@@ -72,12 +72,29 @@ def best_parse(
     return scored[0][2]
 
 
-def normalize_euphemism_lemma(word: str) -> str:
-    morph = require_morph()
-    parses = morph.parse(word)
-    if not parses:
-        return word.lower()
-    return parses[0].normal_form
+def get_word_number(
+    word: str,
+    *,
+    expected_lemma: str | None = None,
+    desired_pos: str | None = None,
+) -> str | None:
+    parse = best_parse(
+        word,
+        expected_lemma=expected_lemma,
+        desired_pos=desired_pos,
+    )
+    if parse is None:
+        return None
+    return parse.tag.number
+
+
+def can_inflect_to_plural(word: str) -> bool:
+    parse = best_parse(word)
+    if parse is None:
+        return False
+    if parse.tag.number == "plur":
+        return True
+    return parse.inflect({"plur"}) is not None
 
 
 def inflect_like(base_euphemism: str, target_word: str, target_lemma: str) -> str:
