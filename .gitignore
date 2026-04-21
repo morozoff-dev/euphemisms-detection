@@ -208,8 +208,6 @@ Thumbs.db
 *.a
 *.lib
 
-.codex
-
 # Executables
 *.out
 *.app
@@ -218,5 +216,6 @@ Thumbs.db
 *.pt
 
 *.md
+!README.md
 data/
 outputs/
