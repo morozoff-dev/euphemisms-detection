@@ -1,4 +1,4 @@
-from src.training.cli import main
+from src.data_prep.cli import main
 
 
 if __name__ == "__main__":

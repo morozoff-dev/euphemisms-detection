@@ -1,4 +1,4 @@
-from src.synthetic.cli import main
+from src.bio.cli import main
 
 
 if __name__ == "__main__":

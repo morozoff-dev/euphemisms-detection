@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.data.text import lookup_norm
-from src.synthetic.morphology import require_morph
+from src.data_prep.morphology import require_morph
 
 
 def build_target_forms(target_words: list[str]) -> dict[str, str]:

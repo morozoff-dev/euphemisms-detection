@@ -32,7 +32,7 @@ INFLECT_GRAMMEMES = {
 def require_morph():
     if MorphAnalyzer is None:
         raise RuntimeError(
-            "pymorphy3 is required for synthetic data generation. "
+            "pymorphy3 is required for data preparation. "
             "Install dependencies from requirements.txt first."
         )
     return get_morph()
@@ -42,7 +42,7 @@ def require_morph():
 def get_morph():
     if MorphAnalyzer is None:
         raise RuntimeError(
-            "pymorphy3 is required for synthetic data generation. "
+            "pymorphy3 is required for data preparation. "
             "Install dependencies from requirements.txt first."
         )
     return MorphAnalyzer()

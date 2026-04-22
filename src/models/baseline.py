@@ -24,8 +24,13 @@ from src.models import (
     build_token_classifier,
     build_tokenizer,
 )
-from src.training.dataset import BIO_LABELS, PreparedBioDataset, PreparedSample
-from src.training.metrics import (
+from src.bio.converter import (
+    BIO_LABELS,
+    DEFAULT_BIO_OUTPUT_DIR,
+    BioDataset,
+    BioSample,
+)
+from src.models.metrics import (
     build_fp_fn_markdown_report,
     compute_sequence_labeling_metrics,
 )
@@ -33,8 +38,8 @@ from src.training.metrics import (
 
 @dataclass(frozen=True)
 class BaselineTrainingConfig:
-    dataset_dir: str = "outputs/training/bio_dataset"
-    output_dir: str = "outputs/training/rumodernbert_baseline"
+    dataset_dir: str = DEFAULT_BIO_OUTPUT_DIR
+    output_dir: str = "outputs/models/rumodernbert_baseline"
     model_name: str = "deepvk/RuModernBERT-base"
     tokenizer_name: str | None = None
     model_revision: str | None = None
@@ -138,11 +143,11 @@ def resolve_mixed_precision(
 
 
 def maybe_limit_samples(
-    samples: Sequence[PreparedSample],
+    samples: Sequence[BioSample],
     *,
     max_samples: int | None,
     seed: int,
-) -> list[PreparedSample]:
+) -> list[BioSample]:
     sample_list = list(samples)
     if max_samples is None or max_samples >= len(sample_list):
         return sample_list
@@ -157,7 +162,7 @@ def maybe_limit_samples(
 class PreparedTokenClassificationDataset(Dataset):
     def __init__(
         self,
-        samples: Sequence[PreparedSample],
+        samples: Sequence[BioSample],
         *,
         tokenizer,
         label_to_id: dict[str, int],
@@ -460,8 +465,8 @@ def run_training_epoch(
     }
 
 
-def load_split_samples(dataset_dir: str | Path, *, split: str) -> list[PreparedSample]:
-    dataset = PreparedBioDataset.from_directory(dataset_dir, split=split)
+def load_split_samples(dataset_dir: str | Path, *, split: str) -> list[BioSample]:
+    dataset = BioDataset.from_directory(dataset_dir, split=split)
     return list(dataset)
 
 

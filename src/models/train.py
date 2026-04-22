@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from src.bio import DEFAULT_BIO_OUTPUT_DIR
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -10,12 +12,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--dataset-dir",
-        default="outputs/training/bio_dataset",
+        default=DEFAULT_BIO_OUTPUT_DIR,
         help="Directory with train.jsonl/val.jsonl/test.jsonl splits.",
     )
     parser.add_argument(
         "--output-dir",
-        default="outputs/training/rumodernbert_baseline",
+        default="outputs/models/rumodernbert_baseline",
         help="Directory where checkpoints, metrics, and predictions will be stored.",
     )
     parser.add_argument(
@@ -113,7 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--device",
-        default="auto",
+        default="cuda:1",
         help="Device string for PyTorch, for example auto, cpu, or cuda.",
     )
     parser.add_argument(
@@ -159,7 +161,7 @@ def main() -> int:
     args = build_parser().parse_args()
 
     try:
-        from src.training.baseline import BaselineTrainingConfig, train_baseline_model
+        from src.models.baseline import BaselineTrainingConfig, train_baseline_model
     except ModuleNotFoundError as exc:
         print(
             "Missing training dependencies. Install PyTorch and transformers first, "

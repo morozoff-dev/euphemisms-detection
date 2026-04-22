@@ -10,18 +10,20 @@
 
 Проект устроен как трёхшаговый pipeline:
 
-1. Из сырых текстов наркотической тематики строится synthetic positive dataset:
-   - находятся канонические названия веществ;
-   - они заменяются на эвфемизмы с сохранением морфологических свойств;
-   - сохраняются char-level спаны замен.
-2. Из synthetic positives и отрицательных примеров собирается trainable BIO dataset:
-   - positive samples берутся из `outputs/synthetic/data.json`;
-   - negative samples берутся из `data/negatives.txt`;
+1. В `src.data_prep` из сырых positive и negative текстов строятся уже готовые split-файлы для датасета:
+   - positive texts берутся из `data/drug_texts_small.txt`;
+   - negative texts берутся из `data/negatives.txt`;
+   - positive texts с упоминаниями target keywords сэмплируются, как и negatives;
+   - positives и negatives независимо режутся на `train/val/test` с сохранением заданного соотношения;
+   - в `train/val` positives используют `generated_euphemisms.txt` и `generated_slang_euphemisms.txt`;
+   - в `test` positives используют `real_euphemisms.txt`;
+   - сохраняются `train.json`, `val.json`, `test.json` и `manifest.json`.
+2. В `src.bio` готовые split JSON-файлы переводятся в BIO-датасет:
+   - входные `train.json`, `val.json`, `test.json` уже не пересэмпливаются и не режутся заново;
    - текст разбивается на word-level токены;
-   - по char-level спанам строятся BIO-теги;
-   - данные режутся на `train/val/test`;
-   - сохраняются готовые `jsonl`-файлы для обучения.
-3. На готовом BIO dataset обучается baseline token-classification модель:
+   - по char-level entity span'ам строятся BIO-теги;
+   - сохраняются `train.jsonl`, `val.jsonl`, `test.jsonl` и `manifest.json`.
+3. В `src.models.train` на готовом BIO-датасете обучается baseline token-classification модель:
    - берётся `ModernBERT` / `RuModernBERT`;
    - word-level BIO-теги выравниваются на subword-токены;
    - считается token-level и span-level F1;
@@ -31,30 +33,47 @@
 
 - `data/` — входные данные
 - `src/data/` — загрузка и очистка текста
-- `src/synthetic/` — генерация synthetic positive dataset
-- `src/models/` — загрузка transformer-моделей и токенизаторов
-- `src/training/` — подготовка BIO dataset и обучение baseline модели
-- `outputs/synthetic/` — сгенерированный synthetic JSON
-- `outputs/training/` — подготовленные splits, чекпоинты, метрики и предсказания
+- `src/data_prep/` — подготовка data split'ов
+- `src/bio/` — BIO-конвертация split JSON
+- `src/models/` — загрузка transformer-моделей, метрики и baseline training
+- `outputs/data_prep/` — подготовленные split JSON-файлы
+- `outputs/bio/` — BIO-датасет
+- `outputs/models/` — чекпоинты, метрики и предсказания моделей
 
 ## Форматы данных
 
-### Synthetic positive dataset
+### Prepared Split Dataset
 
-После запуска `src.synthetic` создаётся файл `outputs/synthetic/data.json`.
+После запуска `src.data_prep` создаются:
 
-Каждый sample содержит:
+- `outputs/data_prep/splits/train.json`
+- `outputs/data_prep/splits/val.json`
+- `outputs/data_prep/splits/test.json`
+- `outputs/data_prep/splits/manifest.json`
 
-- `text` — исходный текст;
-- `replaced_text` — текст после замены названия вещества на эвфемизм;
-- `euphemisms` — список аннотаций со span-ами, например:
-  - `start`, `end` — границы эвфемизма в `replaced_text`;
-  - `target_word`, `target_lemma`;
-  - `base_euphemism`, `euphemism`.
+Каждый sample в `train.json` / `val.json` / `test.json` содержит:
 
-### Training BIO dataset
+- `sample_id`
+- `source` — `positive` или `negative`
+- `source_index`
+- `text` — итоговый текст, который потом пойдёт в BIO-конвертацию
+- `entities` — список entity span-ов
 
-После запуска `src.training` создаются:
+Для positive samples дополнительно сохраняются:
+
+- `original_text`
+- `euphemisms` — список synthetic replacement-аннотаций
+
+`manifest.json` для data preparation stage хранит:
+
+- какие входные файлы брались;
+- какие euphemism vocab files использовались для `train/val/test`;
+- сколько positive/negative примеров было до и после sampling;
+- как распределились данные по `train/val/test`.
+
+### BIO Dataset
+
+После запуска `src.bio` создаются:
 
 - `train.jsonl`
 - `val.jsonl`
@@ -70,12 +89,10 @@
 - `bio_tags` — BIO-разметка для токенов
 - `entities` — entity spans в char-level формате
 
-`manifest.json` хранит служебную информацию о сборке датасета:
+`manifest.json` для BIO-конвертации хранит:
 
-- какой `seed` использовался;
-- какие входные файлы брались;
-- сколько примеров было до и после sampling;
-- как распределились данные по `train/val/test`;
+- какие входные split JSON-файлы брались;
+- сколько sample-ов было во входных и выходных split'ах;
 - сколько было alignment warning'ов и отброшенных sample'ов.
 
 ## Установка
@@ -100,71 +117,97 @@ venv/bin/pip install -r requirements.txt
 
 ## Как запустить
 
-### 1. Сгенерировать synthetic positive dataset
+### 1. Подготовить Dataset Splits
 
 Из корня проекта:
 
 ```bash
-venv/bin/python -m src.synthetic
+venv/bin/python -m src.data_prep
 ```
 
 По умолчанию будут использованы:
 
 - `data/drug_texts_small.txt`
-- `data/real_euphemisms.txt`
+- `data/negatives.txt`
 - `data/target_keywords_forms_drug.txt`
+- train/val positive euphemisms:
+  - `data/generated_euphemisms.txt`
+  - `data/generated_slang_euphemisms.txt`
+- test positive euphemisms:
+  - `data/real_euphemisms.txt`
+- `positive_limit=10000`
+- `negative_limit=2000`
 
 Результат будет записан в:
 
 ```bash
-outputs/synthetic/data.json
+outputs/data_prep/splits/
 ```
 
-### 2. Подготовить BIO dataset для обучения
+Новый default pipeline делает всё на этапе подготовки данных:
+
+- сэмплирует positive и negative source texts;
+- делит их на `train/val/test`;
+- смешивает positives и negatives внутри каждого split;
+- в `train/val` использует generated euphemisms;
+- в `test` использует real euphemisms.
+
+Явный запуск этого сценария:
+
+```bash
+venv/bin/python -m src.data_prep \
+  --positive-limit 10000 \
+  --negative-limit 2000 \
+  --train-euphemisms-paths data/generated_euphemisms.txt data/generated_slang_euphemisms.txt \
+  --test-euphemisms-paths data/real_euphemisms.txt \
+  --output-dir outputs/data_prep/splits \
+  --train-ratio 0.8 \
+  --val-ratio 0.1 \
+  --test-ratio 0.1 \
+  --seed 42
+```
+
+Если нужно поменять negatives или euphemism vocab files, это теперь делается здесь, на этапе подготовки данных.
+
+### 2. Преобразовать Split JSON в BIO
 
 Минимальный запуск:
 
 ```bash
-venv/bin/python -m src.training
+venv/bin/python -m src.bio
 ```
 
 По умолчанию будут использованы:
 
-- positives: `outputs/synthetic/data.json`
-- negatives: `data/negatives.txt`
-- output dir: `outputs/training/bio_dataset`
-- split ratios: `0.8 / 0.1 / 0.1`
-- `seed=42`
+- input dir: `outputs/data_prep/splits`
+- output dir: `outputs/bio`
 
-Пример запуска на части данных:
+`src.bio` не делает sampling и split. Он только переводит уже готовые `train.json`, `val.json`, `test.json` из этапа подготовки данных в BIO `jsonl`.
+
+Обычный запуск:
 
 ```bash
-venv/bin/python -m src.training \
-  --positive-limit 20000 \
-  --negative-limit 20000 \
-  --output-dir outputs/training/run_01 \
-  --seed 42
+venv/bin/python -m src.bio \
+  --input-dir outputs/data_prep/splits \
+  --output-dir outputs/bio
 ```
 
 Поддерживаются параметры:
 
-- `--positive-limit`
-- `--negative-limit`
-- `--positive-fraction`
-- `--negative-fraction`
-- `--train-ratio`
-- `--val-ratio`
-- `--test-ratio`
-- `--seed`
+- `--input-dir`
+- `--train-path`
+- `--val-path`
+- `--test-path`
+- `--output-dir`
 
 ### 3. Обучить baseline ModernBERT / RuModernBERT
 
 Основной запуск на русском baseline:
 
 ```bash
-venv/bin/python -m src.training.train \
+venv/bin/python -m src.models.train \
   --model-name deepvk/RuModernBERT-base \
-  --output-dir outputs/training/rumodernbert_base_run01 \
+  --output-dir outputs/models/rumodernbert_base_run01 \
   --epochs 3 \
   --train-batch-size 8 \
   --eval-batch-size 16 \
@@ -176,9 +219,9 @@ CLI по умолчанию использует `patched-tokenizer` для `dee
 Быстрый smoke test на небольшом подмножестве:
 
 ```bash
-venv/bin/python -m src.training.train \
+venv/bin/python -m src.models.train \
   --model-name deepvk/RuModernBERT-small \
-  --output-dir outputs/training/rumodernbert_smoke \
+  --output-dir outputs/models/rumodernbert_smoke \
   --epochs 1 \
   --train-batch-size 4 \
   --eval-batch-size 8 \
@@ -196,10 +239,10 @@ venv/bin/python -m src.training.train \
 После этого CLI можно запускать на локальных папках:
 
 ```bash
-venv/bin/python -m src.training.train \
+venv/bin/python -m src.models.train \
   --model-name /path/to/local/model \
   --tokenizer-name /path/to/local/tokenizer \
-  --output-dir outputs/training/rumodernbert_local_run
+  --output-dir outputs/models/rumodernbert_local_run
 ```
 
 Основные параметры training CLI:
@@ -225,7 +268,7 @@ venv/bin/python -m src.training.train \
 - `--max-val-samples`
 - `--max-test-samples`
 
-После запуска `src.training.train` сохраняются:
+После запуска `src.models.train` сохраняются:
 
 - `run_config.json`
 - `best_model/`
@@ -254,13 +297,13 @@ venv/bin/python -m src.training.train \
 - загрузка и очистка raw texts;
 - поиск канонических форм по словарю;
 - морфологически согласованная подстановка эвфемизмов;
-- генерация synthetic positive dataset;
-- подготовка BIO training dataset;
-- baseline training loop для `ModernBERT` / `RuModernBERT`;
+- подготовка data split dataset с positives и negatives;
+- преобразование split JSON в BIO-датасет;
+- baseline training loop для `ModernBERT` / `RuModernBERT` в `src.models`;
 - token-level и span-level evaluation;
 - сохранение лучшего чекпоинта, predictions и metrics;
 - отдельный читаемый `val`-лог FP/FN для span-level error analysis;
-- reproducible sampling и split по `seed`;
+- reproducible sampling и split по `seed` на этапе подготовки данных;
 - предупреждения в терминал, если char-level span нечётко совпадает с границами токенов;
 - `run_config.json` для воспроизводимого baseline training run.
 
@@ -274,17 +317,10 @@ venv/bin/python -m src.training.train \
 Если нужно загрузить уже подготовленный split в Python-коде:
 
 ```python
-from src.training import PreparedBioDataset
+from src.bio import BioDataset
 
-train_ds = PreparedBioDataset.from_directory(
-    "outputs/training/bio_dataset",
+train_ds = BioDataset.from_directory(
+    "outputs/bio",
     split="train",
 )
 ```
-
-## Замечание по документации
-
-При добавлении новых модулей, команд или этапов пайплайна нужно обновлять:
-
-- `AGENTS.md` — как рабочий статус и агентные инструкции;
-- `README.md` — как описание проекта для человека и инструкция по запуску.

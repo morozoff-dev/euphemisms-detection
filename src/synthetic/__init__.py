@@ -1,1 +1,0 @@
-"""Synthetic euphemism generation package."""
