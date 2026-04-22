@@ -30,7 +30,8 @@
    - word-level BIO-теги выравниваются на subword-токены;
    - считается token-level и span-level F1;
    - после каждой эпохи в логах считаются метрики и на `val`, и на `test`;
-   - сохраняются лучший чекпоинт, метрики, предсказания на `val/test` и отдельный человеко-читаемый `test`-лог FP/FN.
+   - сохраняются лучший чекпоинт, метрики, предсказания на `val/test` и отдельный человеко-читаемый `test`-лог FP/FN;
+   - для каждого запуска автоматически создаётся отдельная run-папка в `outputs/models/`.
 
 ## Структура проекта
 
@@ -221,12 +222,15 @@ venv/bin/python -m src.bio \
 ```bash
 venv/bin/python -m src.models.train \
   --model-name deepvk/RuModernBERT-base \
-  --output-dir outputs/models/rumodernbert_base_run01 \
   --epochs 3 \
   --train-batch-size 8 \
   --eval-batch-size 16 \
   --max-length 256
 ```
+
+При каждом запуске `src.models.train` автоматически создаётся новая папка вида `outputs/models/rumodernbert_base_04_22_15_37`, где суффикс — это `месяц_день_час_минута` времени старта train.
+
+Параметр `--output-dir` теперь задаёт базовую директорию для таких auto-generated run-папок.
 
 CLI по умолчанию использует `patched-tokenizer` для `deepvk/RuModernBERT-*`, потому что это важнее для NER/sequence labeling, чем стандартный tokenizer revision.
 
@@ -235,7 +239,6 @@ CLI по умолчанию использует `patched-tokenizer` для `dee
 ```bash
 venv/bin/python -m src.models.train \
   --model-name deepvk/RuModernBERT-small \
-  --output-dir outputs/models/rumodernbert_smoke \
   --epochs 1 \
   --train-batch-size 4 \
   --eval-batch-size 8 \
@@ -256,7 +259,7 @@ venv/bin/python -m src.models.train \
 venv/bin/python -m src.models.train \
   --model-name /path/to/local/model \
   --tokenizer-name /path/to/local/tokenizer \
-  --output-dir outputs/models/rumodernbert_local_run
+  --output-dir outputs/models_local
 ```
 
 Основные параметры training CLI:
@@ -282,7 +285,7 @@ venv/bin/python -m src.models.train \
 - `--max-val-samples`
 - `--max-test-samples`
 
-После запуска `src.models.train` сохраняются:
+После запуска `src.models.train` в автоматически созданную папку `outputs/models/<run_name>/` сохраняются:
 
 - `run_config.json`
 - `best_model/`

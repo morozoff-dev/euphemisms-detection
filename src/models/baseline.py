@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import math
 import random
+import re
 import time
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
@@ -39,7 +41,7 @@ from src.models.metrics import (
 @dataclass(frozen=True)
 class BaselineTrainingConfig:
     dataset_dir: str = DEFAULT_BIO_OUTPUT_DIR
-    output_dir: str = "outputs/models/rumodernbert_baseline"
+    output_dir: str = "outputs/models"
     model_name: str = "deepvk/RuModernBERT-base"
     tokenizer_name: str | None = None
     model_revision: str | None = None
@@ -305,6 +307,35 @@ def prefix_metrics(
     }
 
 
+def build_short_model_name(model_name_or_path: str) -> str:
+    normalized_name = model_name_or_path.rstrip("/\\")
+    if not normalized_name:
+        return "model"
+
+    base_name = normalized_name.split("/")[-1].split("\\")[-1]
+    sanitized_name = re.sub(r"[^0-9A-Za-z]+", "_", base_name).strip("_").lower()
+    return sanitized_name or "model"
+
+
+def build_run_output_dir(
+    base_output_dir: str | Path,
+    *,
+    model_name_or_path: str,
+    started_at: datetime,
+) -> Path:
+    timestamp = started_at.strftime("%m_%d_%H_%M")
+    run_name = f"{build_short_model_name(model_name_or_path)}_{timestamp}"
+    base_path = Path(base_output_dir)
+    candidate = base_path / run_name
+    collision_index = 2
+
+    while candidate.exists():
+        candidate = base_path / f"{run_name}_{collision_index:02d}"
+        collision_index += 1
+
+    return candidate
+
+
 def evaluate_model(
     model: torch.nn.Module,
     dataloader: DataLoader,
@@ -500,8 +531,13 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         device,
     )
 
-    output_dir = Path(config.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    run_started_at = datetime.now().astimezone()
+    output_dir = build_run_output_dir(
+        config.output_dir,
+        model_name_or_path=config.model_name,
+        started_at=run_started_at,
+    )
+    output_dir.mkdir(parents=True, exist_ok=False)
 
     label_to_id = {label: index for index, label in enumerate(BIO_LABELS)}
     id_to_label = {index: label for label, index in label_to_id.items()}
@@ -626,6 +662,9 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         "resolved_runtime": {
             "device": str(device),
             "mixed_precision": resolved_mixed_precision,
+            "run_started_at": run_started_at.isoformat(timespec="seconds"),
+            "output_dir": str(output_dir),
+            "run_name": output_dir.name,
             "tokenizer_revision": resolved_tokenizer_revision,
             "parameter_counts": parameter_counts,
             "total_training_steps": total_training_steps,
@@ -642,6 +681,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
     }
     write_json(output_dir / "run_config.json", summary_stub)
 
+    print(f"Run directory: {output_dir}")
     print(f"Training device: {device}")
     print(
         "Model parameters: "

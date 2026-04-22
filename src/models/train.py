@@ -17,8 +17,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir",
-        default="outputs/models/rumodernbert_baseline",
-        help="Directory where checkpoints, metrics, and predictions will be stored.",
+        default="outputs/models",
+        help="Base directory where a timestamped run directory will be created automatically.",
     )
     parser.add_argument(
         "--model-name",
