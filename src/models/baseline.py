@@ -294,6 +294,17 @@ def write_text(path: str | Path, text: str) -> None:
     output_path.write_text(text, encoding="utf-8")
 
 
+def prefix_metrics(
+    metrics: dict[str, float | int],
+    *,
+    prefix: str,
+) -> dict[str, float | int]:
+    return {
+        f"{prefix}{metric_name}": metric_value
+        for metric_name, metric_value in metrics.items()
+    }
+
+
 def evaluate_model(
     model: torch.nn.Module,
     dataloader: DataLoader,
@@ -675,6 +686,14 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             amp_dtype=amp_dtype,
             collect_predictions=False,
         )
+        test_result = evaluate_model(
+            model,
+            dataloaders["test"],
+            id_to_label=id_to_label,
+            device=device,
+            amp_dtype=amp_dtype,
+            collect_predictions=False,
+        )
 
         epoch_summary = {
             "epoch": epoch_index,
@@ -683,6 +702,8 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             "train_elapsed_seconds": train_metrics["elapsed_seconds"],
             "val_loss": val_result.loss,
             **val_result.metrics,
+            "test_loss": test_result.loss,
+            **prefix_metrics(test_result.metrics, prefix="test_"),
         }
         history.append(epoch_summary)
 
@@ -691,7 +712,10 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             f"train_loss={train_metrics['loss']:.6f} | "
             f"val_loss={val_result.loss:.6f} | "
             f"val_token_f1={val_result.metrics['token_f1']:.4f} | "
-            f"val_span_f1={val_result.metrics['span_f1']:.4f}"
+            f"val_span_f1={val_result.metrics['span_f1']:.4f} | "
+            f"test_loss={test_result.loss:.6f} | "
+            f"test_token_f1={test_result.metrics['token_f1']:.4f} | "
+            f"test_span_f1={test_result.metrics['span_f1']:.4f}"
         )
 
         score = (
@@ -709,6 +733,8 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                     "epoch": epoch_index,
                     "val_loss": val_result.loss,
                     **val_result.metrics,
+                    "test_loss": test_result.loss,
+                    **prefix_metrics(test_result.metrics, prefix="test_"),
                 },
             )
             print(f"Saved new best checkpoint to {best_model_dir}")
@@ -742,10 +768,10 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
 
     analysis_dir = output_dir / "analysis"
     write_text(
-        analysis_dir / "val_fp_fn.md",
+        analysis_dir / "test_fp_fn.md",
         build_fp_fn_markdown_report(
-            final_val_result.predictions,
-            split_name="val",
+            final_test_result.predictions,
+            split_name="test",
         ),
     )
 

@@ -27,7 +27,8 @@
    - берётся `ModernBERT` / `RuModernBERT`;
    - word-level BIO-теги выравниваются на subword-токены;
    - считается token-level и span-level F1;
-   - сохраняются лучший чекпоинт, метрики, предсказания на `val/test` и отдельный человеко-читаемый `val`-лог FP/FN.
+   - после каждой эпохи в логах считаются метрики и на `val`, и на `test`;
+   - сохраняются лучший чекпоинт, метрики, предсказания на `val/test` и отдельный человеко-читаемый `test`-лог FP/FN.
 
 ## Структура проекта
 
@@ -277,7 +278,7 @@ venv/bin/python -m src.models.train \
 - `training_summary.json`
 - `predictions/val.jsonl`
 - `predictions/test.jsonl`
-- `analysis/val_fp_fn.md`
+- `analysis/test_fp_fn.md`
 
 В `metrics.json` сохраняются:
 
@@ -285,7 +286,7 @@ venv/bin/python -m src.models.train \
 - span-level precision / recall / F1;
 - `val` и `test` метрики лучшего чекпоинта.
 
-В `analysis/val_fp_fn.md` сохраняется читаемый markdown-отчёт по `val`:
+В `analysis/test_fp_fn.md` сохраняется читаемый markdown-отчёт по `test`:
 
 - в отчёт попадают только sample-ы с ошибками `FP` или `FN`;
 - для каждого sample показываются исходный `Text`, строки `Gold` и `Pred`;
