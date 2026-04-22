@@ -12,7 +12,7 @@ from src.data_prep.morphology import (
     get_word_number,
     inflect_like,
 )
-from src.data_prep.targets import build_target_forms
+from src.data_prep.targets import build_observed_euphemism_forms, build_target_forms
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,8 @@ class EuphemismAnnotation:
     source_end: int
     start: int
     end: int
+    annotation_kind: str = "synthetic_replacement"
+    is_replaced: bool = True
 
 
 @dataclass(frozen=True)
@@ -86,11 +88,10 @@ DEFAULT_TEXTS_PATH = "data/drug_texts_small.txt"
 DEFAULT_TARGET_WORDS_PATH = "data/target_keywords_forms_drug.txt"
 DEFAULT_NEGATIVES_PATH = "data/negatives.txt"
 DEFAULT_DATA_PREP_OUTPUT_DIR = "outputs/data_prep/splits"
-DEFAULT_TRAIN_EUPHEMISMS_PATHS = (
-    "data/generated_euphemisms.txt",
-    "data/generated_slang_euphemisms.txt",
-)
-DEFAULT_TEST_EUPHEMISMS_PATHS = ("data/real_euphemisms.txt",)
+DEFAULT_OBSERVED_EUPHEMISMS_PATHS = ("data/real_euphemisms.txt",)
+DEFAULT_TRAIN_EUPHEMISMS_PATHS = ("data/generated_slang_euphemisms.txt",)
+DEFAULT_TEST_EUPHEMISMS_PATHS = ("data/generated_euphemisms.txt",)
+DEFAULT_TARGET_REPLACEMENT_FRACTION = 0.5
 DEFAULT_POSITIVE_LIMIT = 10000
 DEFAULT_NEGATIVE_LIMIT = 2000
 
@@ -162,14 +163,48 @@ def choose_euphemism(
     )
 
 
+def choose_replacement_token_indices(
+    target_token_indices: list[int],
+    *,
+    replacement_fraction: float,
+    rng: random.Random,
+) -> set[int]:
+    if replacement_fraction < 0 or replacement_fraction > 1:
+        raise ValueError("Target replacement fraction must be between 0.0 and 1.0.")
+    if not target_token_indices or replacement_fraction == 0:
+        return set()
+    if replacement_fraction == 1:
+        return set(target_token_indices)
+
+    replacement_count = int(len(target_token_indices) * replacement_fraction)
+    if replacement_count == 0:
+        replacement_count = 1
+    replacement_count = min(len(target_token_indices), replacement_count)
+    return set(rng.sample(target_token_indices, replacement_count))
+
+
 def replace_in_text(
     text: str,
     *,
     form_to_lemma: dict[str, str],
+    observed_euphemism_forms: dict[str, tuple[str, str]],
     euphemisms: list[EuphemismEntry],
+    target_replacement_fraction: float,
     rng: random.Random,
 ) -> ReplacedTextSample:
     normalized_text = nfc(text)
+    word_matches = list(WORD_RE.finditer(normalized_text))
+    target_token_indices = [
+        index
+        for index, match in enumerate(word_matches)
+        if lookup_norm(match.group(0)) in form_to_lemma
+    ]
+    replacement_token_indices = choose_replacement_token_indices(
+        target_token_indices,
+        replacement_fraction=target_replacement_fraction,
+        rng=rng,
+    )
+
     lemma_to_euphemism: dict[str, EuphemismEntry] = {}
     used_euphemisms_in_text: set[str] = set()
 
@@ -179,7 +214,7 @@ def replace_in_text(
     last_pos = 0
     replaced_cursor = 0
 
-    for match in WORD_RE.finditer(normalized_text):
+    for index, match in enumerate(word_matches):
         start, end = match.span()
         token = match.group(0)
 
@@ -190,60 +225,99 @@ def replace_in_text(
         token_norm = lookup_norm(token)
         target_lemma = form_to_lemma.get(token_norm)
 
-        if target_lemma is None:
-            replaced_parts.append(token)
-            replaced_cursor += len(token)
+        if target_lemma is not None:
+            output_token = token
+            base_euphemism = target_lemma
+            annotation_kind = "unchanged_target_keyword"
+            is_replaced = False
+
+            if index in replacement_token_indices:
+                target_number = get_word_number(token, expected_lemma=target_lemma)
+                selected_euphemism = lemma_to_euphemism.get(target_lemma)
+                replacement = None
+
+                if selected_euphemism is not None and is_number_compatible(
+                    selected_euphemism,
+                    target_number=target_number,
+                ):
+                    candidate_replacement = inflect_like(
+                        selected_euphemism.text,
+                        token,
+                        target_lemma,
+                    )
+                    if is_replacement_number_compatible(
+                        candidate_replacement,
+                        target_number=target_number,
+                    ):
+                        replacement = candidate_replacement
+
+                if replacement is None:
+                    selected_euphemism, replacement = choose_euphemism(
+                        euphemisms,
+                        target_word=token,
+                        target_lemma=target_lemma,
+                        target_number=target_number,
+                        used_in_text=used_euphemisms_in_text,
+                        rng=rng,
+                    )
+                    lemma_to_euphemism[target_lemma] = selected_euphemism
+                    used_euphemisms_in_text.add(selected_euphemism.text)
+
+                output_token = replacement
+                base_euphemism = selected_euphemism.text
+                annotation_kind = "synthetic_replacement"
+                is_replaced = True
+
+            output_start = replaced_cursor
+            output_end = output_start + len(output_token)
+            replaced_parts.append(output_token)
+            replaced_cursor = output_end
+
+            annotations.append(
+                EuphemismAnnotation(
+                    target_word=token,
+                    target_lemma=target_lemma,
+                    base_euphemism=base_euphemism,
+                    euphemism=output_token,
+                    source_start=start,
+                    source_end=end,
+                    start=output_start,
+                    end=output_end,
+                    annotation_kind=annotation_kind,
+                    is_replaced=is_replaced,
+                )
+            )
             last_pos = end
             continue
 
-        target_number = get_word_number(token, expected_lemma=target_lemma)
-        selected_euphemism = lemma_to_euphemism.get(target_lemma)
-        replacement = None
+        observed_euphemism = observed_euphemism_forms.get(token_norm)
+        if observed_euphemism is not None:
+            output_start = replaced_cursor
+            output_end = output_start + len(token)
 
-        if selected_euphemism is not None and is_number_compatible(
-            selected_euphemism,
-            target_number=target_number,
-        ):
-            candidate_replacement = inflect_like(
-                selected_euphemism.text,
-                token,
-                target_lemma,
+            replaced_parts.append(token)
+            replaced_cursor = output_end
+
+            base_euphemism, euphemism_lemma = observed_euphemism
+            annotations.append(
+                EuphemismAnnotation(
+                    target_word=token,
+                    target_lemma=euphemism_lemma,
+                    base_euphemism=base_euphemism,
+                    euphemism=token,
+                    source_start=start,
+                    source_end=end,
+                    start=output_start,
+                    end=output_end,
+                    annotation_kind="observed_real_euphemism",
+                    is_replaced=False,
+                )
             )
-            if is_replacement_number_compatible(
-                candidate_replacement,
-                target_number=target_number,
-            ):
-                replacement = candidate_replacement
+            last_pos = end
+            continue
 
-        if replacement is None:
-            selected_euphemism, replacement = choose_euphemism(
-                euphemisms,
-                target_word=token,
-                target_lemma=target_lemma,
-                target_number=target_number,
-                used_in_text=used_euphemisms_in_text,
-                rng=rng,
-            )
-            lemma_to_euphemism[target_lemma] = selected_euphemism
-            used_euphemisms_in_text.add(selected_euphemism.text)
-        replacement_start = replaced_cursor
-        replacement_end = replacement_start + len(replacement)
-
-        replaced_parts.append(replacement)
-        replaced_cursor = replacement_end
-
-        annotations.append(
-            EuphemismAnnotation(
-                target_word=token,
-                target_lemma=target_lemma,
-                base_euphemism=selected_euphemism.text,
-                euphemism=replacement,
-                source_start=start,
-                source_end=end,
-                start=replacement_start,
-                end=replacement_end,
-            )
-        )
+        replaced_parts.append(token)
+        replaced_cursor += len(token)
         last_pos = end
 
     tail = normalized_text[last_pos:]
@@ -268,9 +342,9 @@ def coerce_path_list(
     return [str(Path(path)) for path in paths]
 
 
-def load_euphemisms(
+def load_euphemism_texts(
     path_or_paths: str | Path | Sequence[str | Path],
-) -> list[EuphemismEntry]:
+) -> list[str]:
     deduplicated = list(
         dict.fromkeys(
             euphemism
@@ -280,6 +354,13 @@ def load_euphemisms(
     )
     if not deduplicated:
         raise ValueError("Euphemism vocabulary is empty.")
+    return deduplicated
+
+
+def load_euphemisms(
+    path_or_paths: str | Path | Sequence[str | Path],
+) -> list[EuphemismEntry]:
+    deduplicated = load_euphemism_texts(path_or_paths)
     return [
         EuphemismEntry(
             text=euphemism,
@@ -294,7 +375,9 @@ def build_replaced_samples(
     texts: Iterable[str],
     *,
     form_to_lemma: dict[str, str],
+    observed_euphemism_forms: dict[str, tuple[str, str]],
     euphemisms: list[EuphemismEntry],
+    target_replacement_fraction: float,
     seed: int | None = 42,
 ) -> list[ReplacedTextSample]:
     rng = random.Random(seed)
@@ -302,7 +385,9 @@ def build_replaced_samples(
         replace_in_text(
             text,
             form_to_lemma=form_to_lemma,
+            observed_euphemism_forms=observed_euphemism_forms,
             euphemisms=euphemisms,
+            target_replacement_fraction=target_replacement_fraction,
             rng=rng,
         )
         for text in texts
@@ -346,15 +431,27 @@ def build_split_record_from_negative_text(
     )
 
 
-def contains_target_form(
+def contains_lookup_form(
     text: str,
     *,
-    form_to_lemma: dict[str, str],
+    lookup: dict[str, object],
 ) -> bool:
     normalized_text = nfc(text)
     return any(
-        lookup_norm(match.group(0)) in form_to_lemma
+        lookup_norm(match.group(0)) in lookup
         for match in WORD_RE.finditer(normalized_text)
+    )
+
+
+def contains_positive_signal(
+    text: str,
+    *,
+    form_to_lemma: dict[str, str],
+    observed_euphemism_forms: dict[str, tuple[str, str]],
+) -> bool:
+    return contains_lookup_form(text, lookup=form_to_lemma) or contains_lookup_form(
+        text,
+        lookup=observed_euphemism_forms,
     )
 
 
@@ -443,11 +540,13 @@ def build_dataset_splits(
     *,
     texts_path: str = DEFAULT_TEXTS_PATH,
     negatives_path: str = DEFAULT_NEGATIVES_PATH,
+    observed_euphemisms_paths: Sequence[str] = DEFAULT_OBSERVED_EUPHEMISMS_PATHS,
     train_euphemisms_paths: Sequence[str] = DEFAULT_TRAIN_EUPHEMISMS_PATHS,
     test_euphemisms_paths: Sequence[str] = DEFAULT_TEST_EUPHEMISMS_PATHS,
     val_euphemisms_paths: Sequence[str] | None = None,
     target_words_path: str = DEFAULT_TARGET_WORDS_PATH,
     output_dir: str = DEFAULT_DATA_PREP_OUTPUT_DIR,
+    target_replacement_fraction: float = DEFAULT_TARGET_REPLACEMENT_FRACTION,
     positive_limit: int | None = DEFAULT_POSITIVE_LIMIT,
     negative_limit: int | None = DEFAULT_NEGATIVE_LIMIT,
     train_ratio: float = 0.8,
@@ -460,16 +559,26 @@ def build_dataset_splits(
         val_ratio=val_ratio,
         test_ratio=test_ratio,
     )
+    if target_replacement_fraction < 0 or target_replacement_fraction > 1:
+        raise ValueError("Target replacement fraction must be between 0.0 and 1.0.")
 
     texts = load_lines(texts_path)
     negatives = load_lines(negatives_path)
     target_words = load_lines(target_words_path)
+    observed_euphemism_texts = load_euphemism_texts(observed_euphemisms_paths)
     form_to_lemma = build_target_forms(target_words)
+    observed_euphemism_forms = build_observed_euphemism_forms(
+        observed_euphemism_texts
+    )
     rng = random.Random(seed)
     candidate_positive_texts = [
         text
         for text in texts
-        if contains_target_form(text, form_to_lemma=form_to_lemma)
+        if contains_positive_signal(
+            text,
+            form_to_lemma=form_to_lemma,
+            observed_euphemism_forms=observed_euphemism_forms,
+        )
     ]
     sampled_positive_texts = sample_records(
         candidate_positive_texts,
@@ -516,7 +625,9 @@ def build_dataset_splits(
         positive_samples = build_replaced_samples(
             positive_text_splits[split_name],
             form_to_lemma=form_to_lemma,
+            observed_euphemism_forms=observed_euphemism_forms,
             euphemisms=euphemisms,
+            target_replacement_fraction=target_replacement_fraction,
             seed=None if seed is None else seed + offset,
         )
         positive_records = [
@@ -554,10 +665,14 @@ def build_dataset_splits(
             "positive_texts": texts_path,
             "negative_texts": negatives_path,
             "target_words": target_words_path,
+            "observed_euphemisms": coerce_path_list(observed_euphemisms_paths),
         },
         "sampling": {
             "positive_limit": positive_limit,
             "negative_limit": negative_limit,
+        },
+        "annotation": {
+            "target_replacement_fraction": target_replacement_fraction,
         },
         "split_ratios": {
             "train": train_ratio,

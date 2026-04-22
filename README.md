@@ -13,10 +13,12 @@
 1. В `src.data_prep` из сырых positive и negative текстов строятся уже готовые split-файлы для датасета:
    - positive texts берутся из `data/drug_texts_small.txt`;
    - negative texts берутся из `data/negatives.txt`;
-   - positive texts с упоминаниями target keywords сэмплируются, как и negatives;
+   - positive texts с упоминаниями target keywords или уже встречающихся форм из `data/real_euphemisms.txt` сэмплируются, как и negatives;
    - positives и negatives независимо режутся на `train/val/test` с сохранением заданного соотношения;
-   - в `train/val` positives используют `generated_euphemisms.txt` и `generated_slang_euphemisms.txt`;
-   - в `test` positives используют `real_euphemisms.txt`;
+   - в каждом positive тексте формы из `data/real_euphemisms.txt` дополнительно ищутся в исходном тексте и размечаются как сущности без замены;
+   - target keywords заменяются частично: по умолчанию заменяется 50% найденных mentions, остальные остаются в тексте и тоже размечаются как сущности;
+   - в `train/val` positives используют `generated_slang_euphemisms.txt` как replacement pool;
+   - в `test` positives используют `generated_euphemisms.txt` как replacement pool;
    - сохраняются `train.json`, `val.json`, `test.json` и `manifest.json`.
 2. В `src.bio` готовые split JSON-файлы переводятся в BIO-датасет:
    - входные `train.json`, `val.json`, `test.json` уже не пересэмпливаются и не режутся заново;
@@ -63,12 +65,18 @@
 Для positive samples дополнительно сохраняются:
 
 - `original_text`
-- `euphemisms` — список synthetic replacement-аннотаций
+- `euphemisms` — список положительных entity-аннотаций, включая:
+  - synthetic replacements;
+  - найденные в исходном тексте формы из `real_euphemisms.txt`;
+  - незаменённые target keyword mentions
+  - у каждой аннотации есть `annotation_kind` и `is_replaced`, чтобы было видно, была ли это подстановка или сущность пришла из исходного текста
 
 `manifest.json` для data preparation stage хранит:
 
 - какие входные файлы брались;
+- какой словарь already-present real euphemisms использовался для поиска по исходным positive texts;
 - какие euphemism vocab files использовались для `train/val/test`;
+- какая доля target keyword mentions заменялась;
 - сколько positive/negative примеров было до и после sampling;
 - как распределились данные по `train/val/test`.
 
@@ -131,11 +139,12 @@ venv/bin/python -m src.data_prep
 - `data/drug_texts_small.txt`
 - `data/negatives.txt`
 - `data/target_keywords_forms_drug.txt`
+- `data/real_euphemisms.txt` для поиска уже присутствующих real euphemism forms в positive texts
 - train/val positive euphemisms:
-  - `data/generated_euphemisms.txt`
   - `data/generated_slang_euphemisms.txt`
 - test positive euphemisms:
-  - `data/real_euphemisms.txt`
+  - `data/generated_euphemisms.txt`
+- `target_replacement_fraction=0.5`
 - `positive_limit=10000`
 - `negative_limit=2000`
 
@@ -150,8 +159,10 @@ outputs/data_prep/splits/
 - сэмплирует positive и negative source texts;
 - делит их на `train/val/test`;
 - смешивает positives и negatives внутри каждого split;
-- в `train/val` использует generated euphemisms;
-- в `test` использует real euphemisms.
+- ищет формы из `real_euphemisms.txt` в positive source texts и размечает их без замены;
+- заменяет только часть target keyword mentions, а остальные target mentions тоже размечает как сущности;
+- в `train/val` использует `generated_slang_euphemisms.txt` как replacement pool;
+- в `test` использует `generated_euphemisms.txt` как replacement pool.
 
 Явный запуск этого сценария:
 
@@ -159,9 +170,11 @@ outputs/data_prep/splits/
 venv/bin/python -m src.data_prep \
   --positive-limit 10000 \
   --negative-limit 2000 \
-  --train-euphemisms-paths data/generated_euphemisms.txt data/generated_slang_euphemisms.txt \
-  --test-euphemisms-paths data/real_euphemisms.txt \
+  --observed-euphemisms-paths data/real_euphemisms.txt \
+  --train-euphemisms-paths data/generated_slang_euphemisms.txt \
+  --test-euphemisms-paths data/generated_euphemisms.txt \
   --output-dir outputs/data_prep/splits \
+  --target-replacement-fraction 0.5 \
   --train-ratio 0.8 \
   --val-ratio 0.1 \
   --test-ratio 0.1 \

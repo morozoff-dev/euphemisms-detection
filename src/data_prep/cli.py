@@ -7,6 +7,8 @@ from src.data_prep.builder import (
     DEFAULT_NEGATIVES_PATH,
     DEFAULT_POSITIVE_LIMIT,
     DEFAULT_DATA_PREP_OUTPUT_DIR,
+    DEFAULT_OBSERVED_EUPHEMISMS_PATHS,
+    DEFAULT_TARGET_REPLACEMENT_FRACTION,
     DEFAULT_TEST_EUPHEMISMS_PATHS,
     DEFAULT_TRAIN_EUPHEMISMS_PATHS,
     build_dataset_splits,
@@ -31,6 +33,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--target-words-path",
         default="data/target_keywords_forms_drug.txt",
         help="Path to all target drug forms, one item per line.",
+    )
+    parser.add_argument(
+        "--observed-euphemisms-paths",
+        nargs="+",
+        default=DEFAULT_OBSERVED_EUPHEMISMS_PATHS,
+        help="One or more vocab files whose forms will be searched in positive source "
+        "texts and annotated without replacement.",
     )
     parser.add_argument(
         "--train-euphemisms-paths",
@@ -62,6 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_NEGATIVE_LIMIT,
         help="Maximum number of negative texts to sample before splitting.",
+    )
+    parser.add_argument(
+        "--target-replacement-fraction",
+        type=float,
+        default=DEFAULT_TARGET_REPLACEMENT_FRACTION,
+        help="Fraction of target keyword mentions to replace inside each positive text.",
     )
     parser.add_argument(
         "--output-dir",
@@ -100,11 +115,13 @@ def main() -> int:
     manifest = build_dataset_splits(
         texts_path=args.texts_path,
         negatives_path=args.negatives_path,
+        observed_euphemisms_paths=args.observed_euphemisms_paths,
         train_euphemisms_paths=args.train_euphemisms_paths,
         val_euphemisms_paths=args.val_euphemisms_paths,
         test_euphemisms_paths=args.test_euphemisms_paths,
         target_words_path=args.target_words_path,
         output_dir=args.output_dir,
+        target_replacement_fraction=args.target_replacement_fraction,
         positive_limit=args.positive_limit,
         negative_limit=args.negative_limit,
         train_ratio=args.train_ratio,
