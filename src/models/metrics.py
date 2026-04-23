@@ -365,3 +365,81 @@ def compute_sequence_labeling_metrics(
         "gold_spans": span_metrics["gold_spans"],
         "predicted_spans": span_metrics["predicted_spans"],
     }
+
+
+def has_annotation_kind_metadata(
+    gold_sequences: Sequence[Sequence[str]],
+    token_annotation_kind_sequences: Sequence[Sequence[str | None]],
+) -> bool:
+    if len(gold_sequences) != len(token_annotation_kind_sequences):
+        raise ValueError(
+            "Gold sequences and annotation-kind sequences must have the same size."
+        )
+
+    for gold_tags, token_annotation_kinds in zip(
+        gold_sequences,
+        token_annotation_kind_sequences,
+    ):
+        if len(gold_tags) != len(token_annotation_kinds):
+            raise ValueError(
+                "Gold tag sequences and annotation-kind sequences must be aligned."
+            )
+        for gold_tag, annotation_kind in zip(gold_tags, token_annotation_kinds):
+            if gold_tag != "O" and annotation_kind is None:
+                return False
+    return True
+
+
+def compute_subset_sequence_labeling_metrics(
+    gold_sequences: Sequence[Sequence[str]],
+    predicted_sequences: Sequence[Sequence[str]],
+    token_annotation_kind_sequences: Sequence[Sequence[str | None]],
+    *,
+    allowed_annotation_kinds: set[str],
+) -> dict[str, float | int]:
+    if len(gold_sequences) != len(predicted_sequences):
+        raise ValueError("Gold and predicted sequence lists must have the same size.")
+    if len(gold_sequences) != len(token_annotation_kind_sequences):
+        raise ValueError(
+            "Gold sequences and annotation-kind sequences must have the same size."
+        )
+
+    filtered_gold_sequences: list[list[str]] = []
+    filtered_predicted_sequences: list[list[str]] = []
+
+    for gold_tags, predicted_tags, token_annotation_kinds in zip(
+        gold_sequences,
+        predicted_sequences,
+        token_annotation_kind_sequences,
+    ):
+        if len(gold_tags) != len(predicted_tags):
+            raise ValueError("Gold and predicted token sequences must be aligned.")
+        if len(gold_tags) != len(token_annotation_kinds):
+            raise ValueError(
+                "Gold tag sequences and annotation-kind sequences must be aligned."
+            )
+
+        filtered_gold: list[str] = []
+        filtered_predicted: list[str] = []
+        for gold_tag, predicted_tag, annotation_kind in zip(
+            gold_tags,
+            predicted_tags,
+            token_annotation_kinds,
+        ):
+            if (
+                annotation_kind is not None
+                and annotation_kind not in allowed_annotation_kinds
+            ):
+                continue
+            filtered_gold.append(gold_tag)
+            filtered_predicted.append(predicted_tag)
+
+        filtered_gold_sequences.append(filtered_gold)
+        filtered_predicted_sequences.append(filtered_predicted)
+
+    metrics = compute_sequence_labeling_metrics(
+        filtered_gold_sequences,
+        filtered_predicted_sequences,
+    )
+    metrics["evaluated_sequences"] = len(filtered_gold_sequences)
+    return metrics

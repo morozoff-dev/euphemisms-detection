@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import warnings
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from src.data.io import resolve_input_path, write_json
+from src.data.io import load_lines, resolve_input_path, write_json
 from src.data.text import WORD_RE
 
 ENTITY_LABEL = "EUPHEMISM"
@@ -22,6 +22,8 @@ class EntitySpan:
     end: int
     text: str
     label: str = ENTITY_LABEL
+    annotation_kind: str | None = None
+    is_replaced: bool | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -52,6 +54,7 @@ class BioSample:
     tokens: list[str]
     bio_tags: list[str]
     entities: list[EntitySpan]
+    token_annotation_kinds: list[str | None] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         payload = asdict(self)
@@ -121,8 +124,20 @@ class BioDataset(Sequence[BioSample]):
                         tokens=payload["tokens"],
                         bio_tags=payload["bio_tags"],
                         entities=[
-                            EntitySpan(**entity) for entity in payload["entities"]
+                            EntitySpan(
+                                start=entity["start"],
+                                end=entity["end"],
+                                text=entity["text"],
+                                label=entity.get("label", ENTITY_LABEL),
+                                annotation_kind=entity.get("annotation_kind"),
+                                is_replaced=entity.get("is_replaced"),
+                            )
+                            for entity in payload["entities"]
                         ],
+                        token_annotation_kinds=payload.get(
+                            "token_annotation_kinds",
+                            [None] * len(payload["tokens"]),
+                        ),
                     )
                 )
         return cls(samples)
@@ -138,6 +153,46 @@ class BioDataset(Sequence[BioSample]):
 
 
 def parse_entities(payload: dict, *, text: str) -> list[EntitySpan]:
+    return parse_entities_with_replacement_pool(
+        payload,
+        text=text,
+        replacement_pool_lookup=None,
+    )
+
+
+def parse_entities_with_replacement_pool(
+    payload: dict,
+    *,
+    text: str,
+    replacement_pool_lookup: set[str] | None,
+) -> list[EntitySpan]:
+    if "euphemisms" in payload:
+        entities: list[EntitySpan] = []
+        for annotation in payload["euphemisms"]:
+            annotation_kind = annotation.get("annotation_kind")
+            if annotation_kind is None:
+                base_euphemism = annotation.get("base_euphemism")
+                target_word = annotation.get("target_word")
+                replacement_word = annotation.get("euphemism")
+                if (
+                    replacement_pool_lookup
+                    and base_euphemism in replacement_pool_lookup
+                    and replacement_word != target_word
+                ):
+                    annotation_kind = "synthetic_replacement"
+                else:
+                    annotation_kind = "other_gold_entity"
+            entities.append(
+                EntitySpan(
+                    start=annotation["start"],
+                    end=annotation["end"],
+                    text=text[annotation["start"] : annotation["end"]],
+                    annotation_kind=annotation_kind,
+                    is_replaced=annotation.get("is_replaced"),
+                )
+            )
+        return entities
+
     if "entities" in payload:
         return [
             EntitySpan(
@@ -145,18 +200,10 @@ def parse_entities(payload: dict, *, text: str) -> list[EntitySpan]:
                 end=entity["end"],
                 text=entity.get("text", text[entity["start"] : entity["end"]]),
                 label=entity.get("label", ENTITY_LABEL),
+                annotation_kind=entity.get("annotation_kind"),
+                is_replaced=entity.get("is_replaced"),
             )
             for entity in payload["entities"]
-        ]
-
-    if "euphemisms" in payload:
-        return [
-            EntitySpan(
-                start=annotation["start"],
-                end=annotation["end"],
-                text=text[annotation["start"] : annotation["end"]],
-            )
-            for annotation in payload["euphemisms"]
         ]
 
     return []
@@ -166,6 +213,7 @@ def load_split_samples(
     path: str | Path,
     *,
     split_name: str,
+    replacement_pool_lookup: set[str] | None = None,
 ) -> list[SourceSample]:
     resolved = resolve_input_path(path)
     payload = json.loads(resolved.read_text(encoding="utf-8"))
@@ -175,7 +223,11 @@ def load_split_samples(
         text = item.get("text") or item.get("replaced_text")
         if text is None:
             raise ValueError(f"Missing text field in split sample {index} from {resolved}.")
-        entities = parse_entities(item, text=text)
+        entities = parse_entities_with_replacement_pool(
+            item,
+            text=text,
+            replacement_pool_lookup=replacement_pool_lookup,
+        )
         source = item.get("source")
         if source is None:
             source = "positive" if entities else "negative"
@@ -218,23 +270,33 @@ def is_exact_token_alignment(
     )
 
 
-def build_bio_tags(
+def find_covered_tokens(
+    tokens: list[TokenSpan],
+    *,
+    entity: EntitySpan,
+) -> tuple[list[int], list[TokenSpan]]:
+    covered_indices: list[int] = []
+    covered_tokens: list[TokenSpan] = []
+    for index, token in enumerate(tokens):
+        if token.start < entity.end and token.end > entity.start:
+            covered_indices.append(index)
+            covered_tokens.append(token)
+    return covered_indices, covered_tokens
+
+
+def assign_entities_to_tokens(
     tokens: list[TokenSpan],
     entities: list[EntitySpan],
     *,
     sample_id: str,
     text: str,
     warning_tracker: AlignmentWarningTracker | None = None,
-) -> list[str]:
+) -> tuple[list[str], list[str | None]]:
     labels = ["O"] * len(tokens)
+    token_annotation_kinds: list[str | None] = [None] * len(tokens)
 
     for entity in sorted(entities, key=lambda item: (item.start, item.end)):
-        covered_indices: list[int] = []
-        covered_tokens: list[TokenSpan] = []
-        for index, token in enumerate(tokens):
-            if token.start < entity.end and token.end > entity.start:
-                covered_indices.append(index)
-                covered_tokens.append(token)
+        covered_indices, covered_tokens = find_covered_tokens(tokens, entity=entity)
         if not covered_indices:
             raise ValueError(
                 f"Entity span [{entity.start}, {entity.end}) is not aligned to any token."
@@ -255,7 +317,26 @@ def build_bio_tags(
             labels[token_index] = (
                 f"B-{ENTITY_LABEL}" if offset == 0 else f"I-{ENTITY_LABEL}"
             )
+            token_annotation_kinds[token_index] = entity.annotation_kind
 
+    return labels, token_annotation_kinds
+
+
+def build_bio_tags(
+    tokens: list[TokenSpan],
+    entities: list[EntitySpan],
+    *,
+    sample_id: str,
+    text: str,
+    warning_tracker: AlignmentWarningTracker | None = None,
+) -> list[str]:
+    labels, _ = assign_entities_to_tokens(
+        tokens,
+        entities,
+        sample_id=sample_id,
+        text=text,
+        warning_tracker=warning_tracker,
+    )
     return labels
 
 
@@ -267,7 +348,7 @@ def prepare_sample(
     tokens = tokenize_words(sample.text)
     if not tokens:
         raise ValueError(f"Sample {sample.sample_id} does not contain any word tokens.")
-    bio_tags = build_bio_tags(
+    bio_tags, token_annotation_kinds = assign_entities_to_tokens(
         tokens,
         sample.entities,
         sample_id=sample.sample_id,
@@ -282,6 +363,7 @@ def prepare_sample(
         tokens=[token.text for token in tokens],
         bio_tags=bio_tags,
         entities=sample.entities,
+        token_annotation_kinds=token_annotation_kinds,
     )
 
 
@@ -364,8 +446,14 @@ def build_bio_dataset(
             "test": test_path,
         }
 
+    split_replacement_pool_lookups = load_split_replacement_pool_lookups(input_paths)
+
     input_rows = {
-        split_name: load_split_samples(path, split_name=split_name)
+        split_name: load_split_samples(
+            path,
+            split_name=split_name,
+            replacement_pool_lookup=split_replacement_pool_lookups.get(split_name),
+        )
         for split_name, path in input_paths.items()
     }
 
@@ -402,3 +490,33 @@ def build_bio_dataset(
     )
     write_json(destination / "manifest.json", manifest)
     return manifest
+
+
+def load_split_replacement_pool_lookups(
+    input_paths: dict[str, str | Path],
+) -> dict[str, set[str]]:
+    resolved_input_paths = {
+        split_name: resolve_input_path(path)
+        for split_name, path in input_paths.items()
+    }
+    parent_dirs = {path.parent for path in resolved_input_paths.values()}
+    if len(parent_dirs) != 1:
+        return {}
+
+    manifest_path = next(iter(parent_dirs)) / "manifest.json"
+    if not manifest_path.exists():
+        return {}
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    split_payloads = payload.get("splits", {})
+    lookups: dict[str, set[str]] = {}
+    for split_name in resolved_input_paths:
+        euphemism_paths = split_payloads.get(split_name, {}).get("euphemism_paths", [])
+        if not euphemism_paths:
+            continue
+        lookups[split_name] = {
+            euphemism
+            for euphemism_path in euphemism_paths
+            for euphemism in load_lines(euphemism_path)
+        }
+    return lookups

@@ -29,6 +29,9 @@
    - берётся `ModernBERT` / `RuModernBERT`;
    - word-level BIO-теги выравниваются на subword-токены;
    - считается token-level и span-level F1;
+   - для `test` дополнительно считаются отдельные masked-метрики по двум группам gold-сущностей:
+     - `replacement_pool_only` — только synthetic replacements, пришедшие из test replacement pool;
+     - `other_gold_entities_only` — незаменённые `target_keyword` и найденные в исходном тексте формы из `real_euphemisms.txt`;
    - после каждой эпохи в логах считаются метрики и на `val`, и на `test`;
    - сохраняются лучший чекпоинт, метрики, предсказания на `val/test` и отдельный человеко-читаемый `test`-лог FP/FN;
    - для каждого запуска автоматически создаётся отдельная run-папка в `outputs/models/`.
@@ -98,6 +101,7 @@
 - `tokens` — word-level токены
 - `bio_tags` — BIO-разметка для токенов
 - `entities` — entity spans в char-level формате
+- `token_annotation_kinds` — список той же длины, что и `tokens`; для entity-токенов хранит `annotation_kind` (`synthetic_replacement`, `observed_real_euphemism`, `unchanged_target_keyword`), а для legacy split-файлов без явного `annotation_kind` может использовать fallback `other_gold_entity`; для остальных токенов хранит `null`
 
 `manifest.json` для BIO-конвертации хранит:
 
@@ -198,6 +202,8 @@ venv/bin/python -m src.bio
 - output dir: `outputs/bio`
 
 `src.bio` не делает sampling и split. Он только переводит уже готовые `train.json`, `val.json`, `test.json` из этапа подготовки данных в BIO `jsonl`.
+
+Если у вас уже были старые `outputs/bio/*.jsonl`, после обновления кода их нужно один раз пересобрать через `src.bio`, чтобы в датасет попали `token_annotation_kinds` для новых test subset metrics.
 
 Обычный запуск:
 
@@ -300,7 +306,10 @@ venv/bin/python -m src.models.train \
 
 - token-level precision / recall / F1 / accuracy;
 - span-level precision / recall / F1;
-- `val` и `test` метрики лучшего чекпоинта.
+- `val` и `test` метрики лучшего чекпоинта;
+- для `test` также сохраняется `subsets`:
+  - `replacement_pool_only` — метрики только по gold-спанам типа `synthetic_replacement`, то есть по сущностям, пришедшим из того vocabulary pool, который был передан в `--test-euphemisms-paths`;
+  - `other_gold_entities_only` — метрики по остальным gold-сущностям в `test` (`unchanged_target_keyword`, `observed_real_euphemism`, а для legacy split-файлов также fallback `other_gold_entity`).
 
 В `analysis/test_fp_fn.md` сохраняется читаемый markdown-отчёт по `test`:
 

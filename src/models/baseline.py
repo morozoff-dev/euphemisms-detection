@@ -34,7 +34,9 @@ from src.bio.converter import (
 )
 from src.models.metrics import (
     build_fp_fn_markdown_report,
+    compute_subset_sequence_labeling_metrics,
     compute_sequence_labeling_metrics,
+    has_annotation_kind_metadata,
 )
 
 
@@ -75,6 +77,7 @@ class EncodedSampleMetadata:
     text: str
     tokens: list[str]
     gold_tags: list[str]
+    token_annotation_kinds: list[str | None]
     was_truncated: bool
     original_token_count: int
     kept_token_count: int
@@ -99,6 +102,7 @@ class TokenizedSplitStats:
 class EvaluationResult:
     loss: float
     metrics: dict[str, float | int]
+    subset_metrics: dict[str, dict[str, float | int]]
     predictions: list[dict]
 
 
@@ -181,6 +185,10 @@ class PreparedTokenClassificationDataset(Dataset):
 
         for sample in samples:
             max_word_tokens = max(max_word_tokens, len(sample.tokens))
+            if len(sample.token_annotation_kinds) != len(sample.tokens):
+                raise ValueError(
+                    "Each BIO sample must provide token_annotation_kinds aligned with tokens."
+                )
             encoding = tokenizer(
                 sample.tokens,
                 is_split_into_words=True,
@@ -225,6 +233,9 @@ class PreparedTokenClassificationDataset(Dataset):
             max_subword_tokens = max(max_subword_tokens, len(encoding["input_ids"]))
             kept_tokens = [sample.tokens[index] for index in kept_word_indices]
             kept_gold_tags = [sample.bio_tags[index] for index in kept_word_indices]
+            kept_token_annotation_kinds = [
+                sample.token_annotation_kinds[index] for index in kept_word_indices
+            ]
 
             feature = {key: value for key, value in encoding.items()}
             feature["labels"] = labels
@@ -235,6 +246,7 @@ class PreparedTokenClassificationDataset(Dataset):
                 text=sample.text,
                 tokens=kept_tokens,
                 gold_tags=kept_gold_tags,
+                token_annotation_kinds=kept_token_annotation_kinds,
                 was_truncated=was_truncated,
                 original_token_count=len(sample.tokens),
                 kept_token_count=len(kept_tokens),
@@ -307,6 +319,48 @@ def prefix_metrics(
     }
 
 
+def build_entity_subset_definitions(
+    token_annotation_kind_sequences: Sequence[Sequence[str | None]],
+) -> dict[str, set[str]]:
+    observed_kinds = {
+        annotation_kind
+        for sequence in token_annotation_kind_sequences
+        for annotation_kind in sequence
+        if annotation_kind is not None
+    }
+    if not observed_kinds:
+        return {}
+
+    subset_definitions: dict[str, set[str]] = {}
+    replacement_pool_kinds = {"synthetic_replacement"} & observed_kinds
+    if replacement_pool_kinds:
+        subset_definitions["replacement_pool_only"] = replacement_pool_kinds
+
+    other_gold_entity_kinds = observed_kinds - {"synthetic_replacement"}
+    if other_gold_entity_kinds:
+        subset_definitions["other_gold_entities_only"] = other_gold_entity_kinds
+
+    return subset_definitions
+
+
+def format_subset_metric_summary(
+    subset_metrics: dict[str, dict[str, float | int]],
+) -> str:
+    ordered_names = (
+        "replacement_pool_only",
+        "other_gold_entities_only",
+    )
+    parts = [
+        (
+            f"{subset_name}_span_f1="
+            f"{float(subset_metrics[subset_name]['span_f1']):.4f}"
+        )
+        for subset_name in ordered_names
+        if subset_name in subset_metrics
+    ]
+    return " | ".join(parts)
+
+
 def build_short_model_name(model_name_or_path: str) -> str:
     normalized_name = model_name_or_path.rstrip("/\\")
     if not normalized_name:
@@ -344,12 +398,14 @@ def evaluate_model(
     device: torch.device,
     amp_dtype: torch.dtype | None,
     collect_predictions: bool,
+    compute_entity_subset_metrics: bool = False,
 ) -> EvaluationResult:
     model.eval()
 
     predictions: list[dict] = []
     gold_sequences: list[list[str]] = []
     predicted_sequences: list[list[str]] = []
+    token_annotation_kind_sequences: list[list[str | None]] = []
     loss_sum = 0.0
     active_label_count = 0
 
@@ -388,6 +444,9 @@ def evaluate_model(
 
                 gold_sequences.append(gold_tags)
                 predicted_sequences.append(predicted_tags)
+                token_annotation_kind_sequences.append(
+                    list(sample_metadata.token_annotation_kinds)
+                )
 
                 if collect_predictions:
                     predictions.append(
@@ -399,6 +458,9 @@ def evaluate_model(
                             "tokens": sample_metadata.tokens,
                             "gold_tags": gold_tags,
                             "predicted_tags": predicted_tags,
+                            "token_annotation_kinds": (
+                                sample_metadata.token_annotation_kinds
+                            ),
                             "was_truncated": sample_metadata.was_truncated,
                             "original_token_count": sample_metadata.original_token_count,
                             "kept_token_count": sample_metadata.kept_token_count,
@@ -406,10 +468,33 @@ def evaluate_model(
                     )
 
     metrics = compute_sequence_labeling_metrics(gold_sequences, predicted_sequences)
+    subset_metrics: dict[str, dict[str, float | int]] = {}
+    if compute_entity_subset_metrics:
+        if not has_annotation_kind_metadata(
+            gold_sequences,
+            token_annotation_kind_sequences,
+        ):
+            raise RuntimeError(
+                "Test subset metrics require BIO samples with token_annotation_kinds. "
+                "Rebuild the BIO dataset with `venv/bin/python -m src.bio` "
+                "from split JSON files that still contain `euphemisms` metadata."
+            )
+
+        for subset_name, allowed_annotation_kinds in build_entity_subset_definitions(
+            token_annotation_kind_sequences
+        ).items():
+            subset_metrics[subset_name] = compute_subset_sequence_labeling_metrics(
+                gold_sequences,
+                predicted_sequences,
+                token_annotation_kind_sequences,
+                allowed_annotation_kinds=allowed_annotation_kinds,
+            )
+
     average_loss = loss_sum / max(1, active_label_count)
     return EvaluationResult(
         loss=average_loss,
         metrics=metrics,
+        subset_metrics=subset_metrics,
         predictions=predictions,
     )
 
@@ -733,6 +818,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             device=device,
             amp_dtype=amp_dtype,
             collect_predictions=False,
+            compute_entity_subset_metrics=True,
         )
 
         epoch_summary = {
@@ -745,6 +831,8 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             "test_loss": test_result.loss,
             **prefix_metrics(test_result.metrics, prefix="test_"),
         }
+        if test_result.subset_metrics:
+            epoch_summary["test_subsets"] = test_result.subset_metrics
         history.append(epoch_summary)
 
         print(
@@ -757,6 +845,8 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             f"test_token_f1={test_result.metrics['token_f1']:.4f} | "
             f"test_span_f1={test_result.metrics['span_f1']:.4f}"
         )
+        if test_result.subset_metrics:
+            print(f"Test subsets | {format_subset_metric_summary(test_result.subset_metrics)}")
 
         score = (
             float(val_result.metrics["span_f1"]),
@@ -775,6 +865,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                     **val_result.metrics,
                     "test_loss": test_result.loss,
                     **prefix_metrics(test_result.metrics, prefix="test_"),
+                    "test_subsets": test_result.subset_metrics,
                 },
             )
             print(f"Saved new best checkpoint to {best_model_dir}")
@@ -800,6 +891,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         device=device,
         amp_dtype=amp_dtype,
         collect_predictions=True,
+        compute_entity_subset_metrics=True,
     )
 
     predictions_dir = output_dir / "predictions"
@@ -824,6 +916,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         "test": {
             "loss": final_test_result.loss,
             **final_test_result.metrics,
+            "subsets": final_test_result.subset_metrics,
         },
     }
     write_json(output_dir / "metrics.json", metrics_payload)
@@ -841,5 +934,10 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         f"val_span_f1={final_val_result.metrics['span_f1']:.4f} | "
         f"test_span_f1={final_test_result.metrics['span_f1']:.4f}"
     )
+    if final_test_result.subset_metrics:
+        print(
+            "Final test subsets | "
+            f"{format_subset_metric_summary(final_test_result.subset_metrics)}"
+        )
     print(f"Artifacts saved to {output_dir}")
     return training_summary
