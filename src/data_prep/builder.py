@@ -5,8 +5,18 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from src.data.language import (
+    RUSSIAN_LANGUAGE_CODE,
+    ensure_cld2_available,
+    is_russian_text,
+)
 from src.data.io import load_lines, write_json
-from src.data.text import WORD_RE, lookup_norm, nfc
+from src.data.text import (
+    WORD_RE,
+    lookup_norm,
+    lowercase_if_mostly_uppercase,
+    nfc,
+)
 from src.data_prep.morphology import (
     can_inflect_to_plural,
     get_word_number,
@@ -91,8 +101,49 @@ DEFAULT_DATA_PREP_OUTPUT_DIR = "outputs/data_prep/splits"
 DEFAULT_TRAIN_EUPHEMISMS_PATHS = ("data/generated_slang_euphemisms.txt",)
 DEFAULT_TEST_EUPHEMISMS_PATHS = ("data/generated_euphemisms.txt",)
 DEFAULT_TARGET_REPLACEMENT_FRACTION = 0.5
+DEFAULT_UPPERCASE_LETTER_RATIO_THRESHOLD = 0.5
 DEFAULT_POSITIVE_LIMIT = 10000
 DEFAULT_NEGATIVE_LIMIT = 2000
+
+
+@dataclass(frozen=True)
+class SourceTextPreprocessingStats:
+    total_input_texts: int
+    lowercased_mostly_uppercase: int
+    kept_russian: int
+    dropped_non_russian: int
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def preprocess_source_texts(
+    texts: Iterable[str],
+    *,
+    uppercase_letter_ratio_threshold: float = DEFAULT_UPPERCASE_LETTER_RATIO_THRESHOLD,
+) -> tuple[list[str], SourceTextPreprocessingStats]:
+    ensure_cld2_available()
+
+    source_texts = list(texts)
+    preprocessed_texts: list[str] = []
+    lowercased_mostly_uppercase = 0
+
+    for text in source_texts:
+        normalized_text = lowercase_if_mostly_uppercase(
+            text,
+            uppercase_letter_ratio_threshold=uppercase_letter_ratio_threshold,
+        )
+        if normalized_text != text:
+            lowercased_mostly_uppercase += 1
+        if is_russian_text(normalized_text):
+            preprocessed_texts.append(normalized_text)
+
+    return preprocessed_texts, SourceTextPreprocessingStats(
+        total_input_texts=len(source_texts),
+        lowercased_mostly_uppercase=lowercased_mostly_uppercase,
+        kept_russian=len(preprocessed_texts),
+        dropped_non_russian=len(source_texts) - len(preprocessed_texts),
+    )
 
 
 def is_number_compatible(
@@ -527,8 +578,10 @@ def build_dataset_splits(
     if target_replacement_fraction < 0 or target_replacement_fraction > 1:
         raise ValueError("Target replacement fraction must be between 0.0 and 1.0.")
 
-    texts = load_lines(texts_path)
-    negatives = load_lines(negatives_path)
+    raw_texts = load_lines(texts_path)
+    raw_negatives = load_lines(negatives_path)
+    texts, positive_preprocessing_stats = preprocess_source_texts(raw_texts)
+    negatives, negative_preprocessing_stats = preprocess_source_texts(raw_negatives)
     target_words = load_lines(target_words_path)
     form_to_lemma = build_target_forms(target_words)
     rng = random.Random(seed)
@@ -625,6 +678,19 @@ def build_dataset_splits(
             "negative_texts": negatives_path,
             "target_words": target_words_path,
         },
+        "preprocessing": {
+            "language_filter": {
+                "detector": "cld2",
+                "keep_primary_language": RUSSIAN_LANGUAGE_CODE,
+            },
+            "mostly_uppercase_lowercasing": {
+                "uppercase_letter_ratio_strictly_greater_than": (
+                    DEFAULT_UPPERCASE_LETTER_RATIO_THRESHOLD
+                ),
+            },
+            "positive_texts": positive_preprocessing_stats.to_dict(),
+            "negative_texts": negative_preprocessing_stats.to_dict(),
+        },
         "sampling": {
             "positive_limit": positive_limit,
             "negative_limit": negative_limit,
@@ -638,6 +704,11 @@ def build_dataset_splits(
             "test": test_ratio,
         },
         "counts": {
+            "after_preprocessing": {
+                "positive": len(texts),
+                "negative": len(negatives),
+                "total": len(texts) + len(negatives),
+            },
             "before_sampling": {
                 "positive_candidates": len(candidate_positive_texts),
                 "negative": len(negatives),

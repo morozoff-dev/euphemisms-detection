@@ -13,6 +13,8 @@
 1. В `src.data_prep` из сырых positive и negative текстов строятся уже готовые split-файлы для датасета:
    - positive texts берутся из `data/drug_texts_small.txt`;
    - negative texts берутся из `data/negatives.txt`;
+   - на раннем preprocessing этапе сохраняются только тексты, для которых `cld2` определяет основной язык как русский (`ru`);
+   - если в тексте более 50% букв находятся в верхнем регистре, такой текст полностью переводится в нижний регистр;
    - positive texts с упоминаниями target keywords сэмплируются, как и negatives;
    - positives и negatives независимо режутся на `train/val/test` с сохранением заданного соотношения;
    - target keywords заменяются частично: по умолчанию заменяется 50% найденных mentions, остальные остаются в тексте и тоже размечаются как сущности;
@@ -76,7 +78,9 @@
 `manifest.json` для data preparation stage хранит:
 
 - какие входные файлы брались;
+- какие правила раннего preprocessing применялись (`cld2` language filter и lowercasing mostly-uppercase текстов);
 - какие euphemism vocab files использовались для `train/val/test`;
+- сколько positive/negative текстов осталось после preprocessing;
 - какая доля target keyword mentions заменялась;
 - сколько positive/negative примеров было до и после sampling;
 - как распределились данные по `train/val/test`.
@@ -126,6 +130,7 @@ venv/bin/pip install -r requirements.txt
 
 Для `ModernBERT` нужна версия `transformers>=4.48.0`.
 Для TensorBoard-графиков `requirements.txt` теперь также включает `tensorboard`.
+Для ранней фильтрации русскоязычных текстов на этапе `src.data_prep` `requirements.txt` теперь также включает `pycld2`.
 
 ## Как запустить
 
@@ -158,6 +163,8 @@ outputs/data_prep/splits/
 
 Новый default pipeline делает всё на этапе подготовки данных:
 
+- оставляет только те positive и negative source texts, для которых `cld2` определяет основной язык как русский;
+- если в тексте больше 50% букв в верхнем регистре, полностью переводит его в lower-case;
 - сэмплирует positive и negative source texts;
 - делит их на `train/val/test`;
 - смешивает positives и negatives внутри каждого split;

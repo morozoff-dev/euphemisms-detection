@@ -121,6 +121,14 @@ def main() -> int:
         seed=args.seed,
     )
     print(f"Prepared dataset splits in {args.output_dir}")
+    preprocessing = manifest["preprocessing"]
+    print(
+        "After preprocessing: "
+        f"{preprocessing['positive_texts']['kept_russian']} positive kept "
+        f"(lowercased={preprocessing['positive_texts']['lowercased_mostly_uppercase']}), "
+        f"{preprocessing['negative_texts']['kept_russian']} negative kept "
+        f"(lowercased={preprocessing['negative_texts']['lowercased_mostly_uppercase']})"
+    )
     counts = manifest["counts"]
     print(
         "After sampling: "
