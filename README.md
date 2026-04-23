@@ -13,9 +13,8 @@
 1. В `src.data_prep` из сырых positive и negative текстов строятся уже готовые split-файлы для датасета:
    - positive texts берутся из `data/drug_texts_small.txt`;
    - negative texts берутся из `data/negatives.txt`;
-   - positive texts с упоминаниями target keywords или уже встречающихся форм из `data/real_euphemisms.txt` сэмплируются, как и negatives;
+   - positive texts с упоминаниями target keywords сэмплируются, как и negatives;
    - positives и negatives независимо режутся на `train/val/test` с сохранением заданного соотношения;
-   - в каждом positive тексте формы из `data/real_euphemisms.txt` дополнительно ищутся в исходном тексте и размечаются как сущности без замены;
    - target keywords заменяются частично: по умолчанию заменяется 50% найденных mentions, остальные остаются в тексте и тоже размечаются как сущности;
    - в `train/val` positives используют `generated_slang_euphemisms.txt` как replacement pool;
    - в `test` positives используют `generated_euphemisms.txt` как replacement pool;
@@ -31,7 +30,7 @@
    - считается token-level и span-level F1;
    - для `test` дополнительно считаются отдельные masked-метрики по двум группам gold-сущностей:
      - `replacement_pool_only` — только synthetic replacements, пришедшие из test replacement pool;
-     - `other_gold_entities_only` — незаменённые `target_keyword` и найденные в исходном тексте формы из `real_euphemisms.txt`;
+     - `other_gold_entities_only` — остальные gold-сущности, то есть прежде всего незаменённые `target_keyword`;
    - после каждой эпохи в логах считаются метрики и на `val`, и на `test`;
    - сохраняются лучший чекпоинт, метрики, предсказания на `val/test` и отдельный человеко-читаемый `test`-лог FP/FN;
    - для каждого запуска автоматически создаётся отдельная run-папка в `outputs/models/`.
@@ -71,14 +70,12 @@
 - `original_text`
 - `euphemisms` — список положительных entity-аннотаций, включая:
   - synthetic replacements;
-  - найденные в исходном тексте формы из `real_euphemisms.txt`;
-  - незаменённые target keyword mentions
+  - незаменённые target keyword mentions;
   - у каждой аннотации есть `annotation_kind` и `is_replaced`, чтобы было видно, была ли это подстановка или сущность пришла из исходного текста
 
 `manifest.json` для data preparation stage хранит:
 
 - какие входные файлы брались;
-- какой словарь already-present real euphemisms использовался для поиска по исходным positive texts;
 - какие euphemism vocab files использовались для `train/val/test`;
 - какая доля target keyword mentions заменялась;
 - сколько positive/negative примеров было до и после sampling;
@@ -101,7 +98,7 @@
 - `tokens` — word-level токены
 - `bio_tags` — BIO-разметка для токенов
 - `entities` — entity spans в char-level формате
-- `token_annotation_kinds` — список той же длины, что и `tokens`; для entity-токенов хранит `annotation_kind` (`synthetic_replacement`, `observed_real_euphemism`, `unchanged_target_keyword`), а для legacy split-файлов без явного `annotation_kind` может использовать fallback `other_gold_entity`; для остальных токенов хранит `null`
+- `token_annotation_kinds` — список той же длины, что и `tokens`; для entity-токенов хранит `annotation_kind` (`synthetic_replacement`, `unchanged_target_keyword`), а для legacy split-файлов без явного `annotation_kind` может использовать fallback `other_gold_entity`; для остальных токенов хранит `null`
 
 `manifest.json` для BIO-конвертации хранит:
 
@@ -144,7 +141,6 @@ venv/bin/python -m src.data_prep
 - `data/drug_texts_small.txt`
 - `data/negatives.txt`
 - `data/target_keywords_forms_drug.txt`
-- `data/real_euphemisms.txt` для поиска уже присутствующих real euphemism forms в positive texts
 - train/val positive euphemisms:
   - `data/generated_slang_euphemisms.txt`
 - test positive euphemisms:
@@ -164,7 +160,6 @@ outputs/data_prep/splits/
 - сэмплирует positive и negative source texts;
 - делит их на `train/val/test`;
 - смешивает positives и negatives внутри каждого split;
-- ищет формы из `real_euphemisms.txt` в positive source texts и размечает их без замены;
 - заменяет только часть target keyword mentions, а остальные target mentions тоже размечает как сущности;
 - в `train/val` использует `generated_slang_euphemisms.txt` как replacement pool;
 - в `test` использует `generated_euphemisms.txt` как replacement pool.
@@ -175,7 +170,6 @@ outputs/data_prep/splits/
 venv/bin/python -m src.data_prep \
   --positive-limit 10000 \
   --negative-limit 2000 \
-  --observed-euphemisms-paths data/real_euphemisms.txt \
   --train-euphemisms-paths data/generated_slang_euphemisms.txt \
   --test-euphemisms-paths data/generated_euphemisms.txt \
   --output-dir outputs/data_prep/splits \
@@ -309,7 +303,7 @@ venv/bin/python -m src.models.train \
 - `val` и `test` метрики лучшего чекпоинта;
 - для `test` также сохраняется `subsets`:
   - `replacement_pool_only` — метрики только по gold-спанам типа `synthetic_replacement`, то есть по сущностям, пришедшим из того vocabulary pool, который был передан в `--test-euphemisms-paths`;
-  - `other_gold_entities_only` — метрики по остальным gold-сущностям в `test` (`unchanged_target_keyword`, `observed_real_euphemism`, а для legacy split-файлов также fallback `other_gold_entity`).
+  - `other_gold_entities_only` — метрики по остальным gold-сущностям в `test` (`unchanged_target_keyword`, а для legacy split-файлов также fallback `other_gold_entity`).
 
 В `analysis/test_fp_fn.md` сохраняется читаемый markdown-отчёт по `test`:
 

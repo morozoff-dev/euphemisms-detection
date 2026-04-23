@@ -12,7 +12,7 @@ from src.data_prep.morphology import (
     get_word_number,
     inflect_like,
 )
-from src.data_prep.targets import build_observed_euphemism_forms, build_target_forms
+from src.data_prep.targets import build_target_forms
 
 
 @dataclass(frozen=True)
@@ -88,7 +88,6 @@ DEFAULT_TEXTS_PATH = "data/drug_texts_small.txt"
 DEFAULT_TARGET_WORDS_PATH = "data/target_keywords_forms_drug.txt"
 DEFAULT_NEGATIVES_PATH = "data/negatives.txt"
 DEFAULT_DATA_PREP_OUTPUT_DIR = "outputs/data_prep/splits"
-DEFAULT_OBSERVED_EUPHEMISMS_PATHS = ("data/real_euphemisms.txt",)
 DEFAULT_TRAIN_EUPHEMISMS_PATHS = ("data/generated_slang_euphemisms.txt",)
 DEFAULT_TEST_EUPHEMISMS_PATHS = ("data/generated_euphemisms.txt",)
 DEFAULT_TARGET_REPLACEMENT_FRACTION = 0.5
@@ -187,7 +186,6 @@ def replace_in_text(
     text: str,
     *,
     form_to_lemma: dict[str, str],
-    observed_euphemism_forms: dict[str, tuple[str, str]],
     euphemisms: list[EuphemismEntry],
     target_replacement_fraction: float,
     rng: random.Random,
@@ -290,32 +288,6 @@ def replace_in_text(
             last_pos = end
             continue
 
-        observed_euphemism = observed_euphemism_forms.get(token_norm)
-        if observed_euphemism is not None:
-            output_start = replaced_cursor
-            output_end = output_start + len(token)
-
-            replaced_parts.append(token)
-            replaced_cursor = output_end
-
-            base_euphemism, euphemism_lemma = observed_euphemism
-            annotations.append(
-                EuphemismAnnotation(
-                    target_word=token,
-                    target_lemma=euphemism_lemma,
-                    base_euphemism=base_euphemism,
-                    euphemism=token,
-                    source_start=start,
-                    source_end=end,
-                    start=output_start,
-                    end=output_end,
-                    annotation_kind="observed_real_euphemism",
-                    is_replaced=False,
-                )
-            )
-            last_pos = end
-            continue
-
         replaced_parts.append(token)
         replaced_cursor += len(token)
         last_pos = end
@@ -375,7 +347,6 @@ def build_replaced_samples(
     texts: Iterable[str],
     *,
     form_to_lemma: dict[str, str],
-    observed_euphemism_forms: dict[str, tuple[str, str]],
     euphemisms: list[EuphemismEntry],
     target_replacement_fraction: float,
     seed: int | None = 42,
@@ -385,7 +356,6 @@ def build_replaced_samples(
         replace_in_text(
             text,
             form_to_lemma=form_to_lemma,
-            observed_euphemism_forms=observed_euphemism_forms,
             euphemisms=euphemisms,
             target_replacement_fraction=target_replacement_fraction,
             rng=rng,
@@ -443,16 +413,12 @@ def contains_lookup_form(
     )
 
 
-def contains_positive_signal(
+def contains_target_keyword(
     text: str,
     *,
     form_to_lemma: dict[str, str],
-    observed_euphemism_forms: dict[str, tuple[str, str]],
 ) -> bool:
-    return contains_lookup_form(text, lookup=form_to_lemma) or contains_lookup_form(
-        text,
-        lookup=observed_euphemism_forms,
-    )
+    return contains_lookup_form(text, lookup=form_to_lemma)
 
 
 def choose_sample_size(
@@ -540,7 +506,6 @@ def build_dataset_splits(
     *,
     texts_path: str = DEFAULT_TEXTS_PATH,
     negatives_path: str = DEFAULT_NEGATIVES_PATH,
-    observed_euphemisms_paths: Sequence[str] = DEFAULT_OBSERVED_EUPHEMISMS_PATHS,
     train_euphemisms_paths: Sequence[str] = DEFAULT_TRAIN_EUPHEMISMS_PATHS,
     test_euphemisms_paths: Sequence[str] = DEFAULT_TEST_EUPHEMISMS_PATHS,
     val_euphemisms_paths: Sequence[str] | None = None,
@@ -565,19 +530,14 @@ def build_dataset_splits(
     texts = load_lines(texts_path)
     negatives = load_lines(negatives_path)
     target_words = load_lines(target_words_path)
-    observed_euphemism_texts = load_euphemism_texts(observed_euphemisms_paths)
     form_to_lemma = build_target_forms(target_words)
-    observed_euphemism_forms = build_observed_euphemism_forms(
-        observed_euphemism_texts
-    )
     rng = random.Random(seed)
     candidate_positive_texts = [
         text
         for text in texts
-        if contains_positive_signal(
+        if contains_target_keyword(
             text,
             form_to_lemma=form_to_lemma,
-            observed_euphemism_forms=observed_euphemism_forms,
         )
     ]
     sampled_positive_texts = sample_records(
@@ -625,7 +585,6 @@ def build_dataset_splits(
         positive_samples = build_replaced_samples(
             positive_text_splits[split_name],
             form_to_lemma=form_to_lemma,
-            observed_euphemism_forms=observed_euphemism_forms,
             euphemisms=euphemisms,
             target_replacement_fraction=target_replacement_fraction,
             seed=None if seed is None else seed + offset,
@@ -665,7 +624,6 @@ def build_dataset_splits(
             "positive_texts": texts_path,
             "negative_texts": negatives_path,
             "target_words": target_words_path,
-            "observed_euphemisms": coerce_path_list(observed_euphemisms_paths),
         },
         "sampling": {
             "positive_limit": positive_limit,
