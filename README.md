@@ -125,6 +125,7 @@ venv/bin/pip install -r requirements.txt
 ```
 
 Для `ModernBERT` нужна версия `transformers>=4.48.0`.
+Для TensorBoard-графиков `requirements.txt` теперь также включает `tensorboard`.
 
 ## Как запустить
 
@@ -234,6 +235,29 @@ venv/bin/python -m src.models.train \
 
 CLI по умолчанию использует `patched-tokenizer` для `deepvk/RuModernBERT-*`, потому что это важнее для NER/sequence labeling, чем стандартный tokenizer revision.
 
+TensorBoard-логи теперь пишутся автоматически для каждого training run в:
+
+```bash
+outputs/models/<run_name>/tensorboard/
+```
+
+Запустить просмотр можно так:
+
+```bash
+venv/bin/tensorboard --logdir outputs/models
+```
+
+В TensorBoard сохраняются:
+
+- `epoch/train/*`, `epoch/val/*`, `epoch/test/*` — epoch-level метрики для train/val/test;
+- `epoch/test/subsets/*` — subset-метрики для `replacement_pool_only` и `other_gold_entities_only`;
+- в TensorBoard Custom Scalars дополнительно собираются сравнительные графики:
+  - `train/val/test loss`;
+  - `val/test token F1`;
+  - `val/test span F1`;
+  - `test subset span F1`;
+- `final/val/*` и `final/test/*` — финальные метрики лучшего чекпоинта.
+
 Быстрый smoke test на небольшом подмножестве:
 
 ```bash
@@ -288,6 +312,7 @@ venv/bin/python -m src.models.train \
 После запуска `src.models.train` в автоматически созданную папку `outputs/models/<run_name>/` сохраняются:
 
 - `run_config.json`
+- `tensorboard/`
 - `best_model/`
 - `best_model_metrics.json`
 - `metrics.json`
@@ -304,6 +329,8 @@ venv/bin/python -m src.models.train \
 - для `test` также сохраняется `subsets`:
   - `replacement_pool_only` — метрики только по gold-спанам типа `synthetic_replacement`, то есть по сущностям, пришедшим из того vocabulary pool, который был передан в `--test-euphemisms-paths`;
   - `other_gold_entities_only` — метрики по остальным gold-сущностям в `test` (`unchanged_target_keyword`, а для legacy split-файлов также fallback `other_gold_entity`).
+
+`training_summary.json`, `metrics.json` и остальные JSON-артефакты продолжают сохраняться как раньше; TensorBoard-директория добавляется дополнительно и не заменяет существующие метрики.
 
 В `analysis/test_fp_fn.md` сохраняется читаемый markdown-отчёт по `test`:
 

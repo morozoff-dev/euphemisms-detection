@@ -164,8 +164,9 @@ def main() -> int:
         from src.models.baseline import BaselineTrainingConfig, train_baseline_model
     except ModuleNotFoundError as exc:
         print(
-            "Missing training dependencies. Install PyTorch and transformers first, "
-            "for example: venv/bin/pip install torch 'transformers>=4.48.0'",
+            "Missing training dependencies. Install PyTorch, transformers, and "
+            "TensorBoard first, for example: "
+            "venv/bin/pip install -r requirements.txt",
             file=sys.stderr,
         )
         print(f"Original import error: {exc}", file=sys.stderr)

@@ -9,7 +9,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import torch
 from torch.optim import AdamW
@@ -306,6 +306,84 @@ def write_text(path: str | Path, text: str) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
+
+
+def create_tensorboard_writer(log_dir: str | Path):
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise RuntimeError(
+            "TensorBoard logging requires the `tensorboard` package. "
+            "Install dependencies again, for example: "
+            "`venv/bin/pip install -r requirements.txt`."
+        ) from exc
+
+    output_path = Path(log_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    return SummaryWriter(log_dir=str(output_path))
+
+
+def log_scalar_tree(
+    writer,
+    *,
+    prefix: str,
+    values: dict[str, Any],
+    step: int,
+) -> None:
+    for metric_name, metric_value in values.items():
+        tag = f"{prefix}/{metric_name}"
+        if isinstance(metric_value, dict):
+            log_scalar_tree(
+                writer,
+                prefix=tag,
+                values=metric_value,
+                step=step,
+            )
+            continue
+        if isinstance(metric_value, bool):
+            continue
+        if isinstance(metric_value, (int, float)):
+            writer.add_scalar(tag, float(metric_value), step)
+
+
+def build_tensorboard_custom_scalar_layout() -> dict[str, dict[str, list[Any]]]:
+    return {
+        "Loss": {
+            "Train vs Val vs Test": [
+                "Multiline",
+                [
+                    "epoch/train/loss",
+                    "epoch/val/loss",
+                    "epoch/test/loss",
+                ],
+            ],
+        },
+        "F1": {
+            "Val vs Test Token F1": [
+                "Multiline",
+                [
+                    "epoch/val/token_f1",
+                    "epoch/test/token_f1",
+                ],
+            ],
+            "Val vs Test Span F1": [
+                "Multiline",
+                [
+                    "epoch/val/span_f1",
+                    "epoch/test/span_f1",
+                ],
+            ],
+        },
+        "Subset Span F1": {
+            "Test Subsets": [
+                "Multiline",
+                [
+                    "epoch/test/subsets/replacement_pool_only/span_f1",
+                    "epoch/test/subsets/other_gold_entities_only/span_f1",
+                ],
+            ],
+        },
+    }
 
 
 def prefix_metrics(
@@ -623,6 +701,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         started_at=run_started_at,
     )
     output_dir.mkdir(parents=True, exist_ok=False)
+    tensorboard_dir = output_dir / "tensorboard"
 
     label_to_id = {label: index for index, label in enumerate(BIO_LABELS)}
     id_to_label = {index: label for label, index in label_to_id.items()}
@@ -750,6 +829,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             "run_started_at": run_started_at.isoformat(timespec="seconds"),
             "output_dir": str(output_dir),
             "run_name": output_dir.name,
+            "tensorboard_dir": str(tensorboard_dir),
             "tokenizer_revision": resolved_tokenizer_revision,
             "parameter_counts": parameter_counts,
             "total_training_steps": total_training_steps,
@@ -765,6 +845,8 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         },
     }
     write_json(output_dir / "run_config.json", summary_stub)
+    writer = create_tensorboard_writer(tensorboard_dir)
+    writer.add_custom_scalars(build_tensorboard_custom_scalar_layout())
 
     print(f"Run directory: {output_dir}")
     print(f"Training device: {device}")
@@ -781,163 +863,253 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             f"truncated={stats.truncated_samples}"
         )
 
-    history: list[dict] = []
-    best_epoch: int | None = None
-    best_score: tuple[float, float] | None = None
-    best_model_dir = output_dir / "best_model"
-
-    for epoch_index in range(1, config.epochs + 1):
-        print(f"Starting epoch {epoch_index}/{config.epochs}")
-        train_metrics = run_training_epoch(
-            model,
-            dataloaders["train"],
-            optimizer=optimizer,
-            scheduler=scheduler,
-            device=device,
-            amp_dtype=amp_dtype,
-            scaler=scaler,
-            grad_accumulation_steps=config.grad_accumulation_steps,
-            max_grad_norm=config.max_grad_norm,
-            epoch_index=epoch_index,
-            total_epochs=config.epochs,
-            log_every=config.log_every,
+    try:
+        log_scalar_tree(
+            writer,
+            prefix="run/config",
+            values={
+                "epochs": config.epochs,
+                "train_batch_size": config.train_batch_size,
+                "eval_batch_size": config.eval_batch_size,
+                "learning_rate": config.learning_rate,
+                "weight_decay": config.weight_decay,
+                "warmup_ratio": config.warmup_ratio,
+                "grad_accumulation_steps": config.grad_accumulation_steps,
+                "max_grad_norm": config.max_grad_norm,
+                "max_length": config.max_length,
+                "seed": config.seed,
+                "total_training_steps": total_training_steps,
+                "warmup_steps": warmup_steps,
+            },
+            step=0,
         )
+        for split_name in ("train", "val", "test"):
+            log_scalar_tree(
+                writer,
+                prefix=f"run/dataset/{split_name}",
+                values={
+                    "available_samples": len(available_samples[split_name]),
+                    "selected_samples": len(selected_samples[split_name]),
+                    **datasets[split_name].stats.to_dict(),
+                },
+                step=0,
+            )
 
-        val_result = evaluate_model(
-            model,
+        history: list[dict] = []
+        best_epoch: int | None = None
+        best_score: tuple[float, float] | None = None
+        best_model_dir = output_dir / "best_model"
+
+        for epoch_index in range(1, config.epochs + 1):
+            print(f"Starting epoch {epoch_index}/{config.epochs}")
+            train_metrics = run_training_epoch(
+                model,
+                dataloaders["train"],
+                optimizer=optimizer,
+                scheduler=scheduler,
+                device=device,
+                amp_dtype=amp_dtype,
+                scaler=scaler,
+                grad_accumulation_steps=config.grad_accumulation_steps,
+                max_grad_norm=config.max_grad_norm,
+                epoch_index=epoch_index,
+                total_epochs=config.epochs,
+                log_every=config.log_every,
+            )
+
+            val_result = evaluate_model(
+                model,
+                dataloaders["val"],
+                id_to_label=id_to_label,
+                device=device,
+                amp_dtype=amp_dtype,
+                collect_predictions=False,
+            )
+            test_result = evaluate_model(
+                model,
+                dataloaders["test"],
+                id_to_label=id_to_label,
+                device=device,
+                amp_dtype=amp_dtype,
+                collect_predictions=False,
+                compute_entity_subset_metrics=True,
+            )
+
+            epoch_summary = {
+                "epoch": epoch_index,
+                "train_loss": train_metrics["loss"],
+                "train_optimizer_steps": train_metrics["optimizer_steps"],
+                "train_elapsed_seconds": train_metrics["elapsed_seconds"],
+                "val_loss": val_result.loss,
+                **val_result.metrics,
+                "test_loss": test_result.loss,
+                **prefix_metrics(test_result.metrics, prefix="test_"),
+            }
+            if test_result.subset_metrics:
+                epoch_summary["test_subsets"] = test_result.subset_metrics
+            history.append(epoch_summary)
+
+            log_scalar_tree(
+                writer,
+                prefix="epoch/train",
+                values={
+                    "loss": train_metrics["loss"],
+                    "optimizer_steps": train_metrics["optimizer_steps"],
+                    "elapsed_seconds": train_metrics["elapsed_seconds"],
+                },
+                step=epoch_index,
+            )
+            log_scalar_tree(
+                writer,
+                prefix="epoch/val",
+                values={
+                    "loss": val_result.loss,
+                    **val_result.metrics,
+                },
+                step=epoch_index,
+            )
+            log_scalar_tree(
+                writer,
+                prefix="epoch/test",
+                values={
+                    "loss": test_result.loss,
+                    **test_result.metrics,
+                    "subsets": test_result.subset_metrics,
+                },
+                step=epoch_index,
+            )
+            writer.flush()
+
+            print(
+                f"Epoch {epoch_index} finished | "
+                f"train_loss={train_metrics['loss']:.6f} | "
+                f"val_loss={val_result.loss:.6f} | "
+                f"val_token_f1={val_result.metrics['token_f1']:.4f} | "
+                f"val_span_f1={val_result.metrics['span_f1']:.4f} | "
+                f"test_loss={test_result.loss:.6f} | "
+                f"test_token_f1={test_result.metrics['token_f1']:.4f} | "
+                f"test_span_f1={test_result.metrics['span_f1']:.4f}"
+            )
+            if test_result.subset_metrics:
+                print(
+                    "Test subsets | "
+                    f"{format_subset_metric_summary(test_result.subset_metrics)}"
+                )
+
+            score = (
+                float(val_result.metrics["span_f1"]),
+                float(val_result.metrics["token_f1"]),
+            )
+            if best_score is None or score > best_score:
+                best_score = score
+                best_epoch = epoch_index
+                model.save_pretrained(best_model_dir)
+                tokenizer.save_pretrained(best_model_dir)
+                write_json(
+                    output_dir / "best_model_metrics.json",
+                    {
+                        "epoch": epoch_index,
+                        "val_loss": val_result.loss,
+                        **val_result.metrics,
+                        "test_loss": test_result.loss,
+                        **prefix_metrics(test_result.metrics, prefix="test_"),
+                        "test_subsets": test_result.subset_metrics,
+                    },
+                )
+                print(f"Saved new best checkpoint to {best_model_dir}")
+
+        if best_epoch is None:
+            raise RuntimeError("Training finished without producing a best checkpoint.")
+
+        best_model = AutoModelForTokenClassification.from_pretrained(best_model_dir)
+        best_model.to(device)
+
+        final_val_result = evaluate_model(
+            best_model,
             dataloaders["val"],
             id_to_label=id_to_label,
             device=device,
             amp_dtype=amp_dtype,
-            collect_predictions=False,
+            collect_predictions=True,
         )
-        test_result = evaluate_model(
-            model,
+        final_test_result = evaluate_model(
+            best_model,
             dataloaders["test"],
             id_to_label=id_to_label,
             device=device,
             amp_dtype=amp_dtype,
-            collect_predictions=False,
+            collect_predictions=True,
             compute_entity_subset_metrics=True,
         )
 
-        epoch_summary = {
-            "epoch": epoch_index,
-            "train_loss": train_metrics["loss"],
-            "train_optimizer_steps": train_metrics["optimizer_steps"],
-            "train_elapsed_seconds": train_metrics["elapsed_seconds"],
-            "val_loss": val_result.loss,
-            **val_result.metrics,
-            "test_loss": test_result.loss,
-            **prefix_metrics(test_result.metrics, prefix="test_"),
+        predictions_dir = output_dir / "predictions"
+        write_jsonl(predictions_dir / "val.jsonl", final_val_result.predictions)
+        write_jsonl(predictions_dir / "test.jsonl", final_test_result.predictions)
+
+        analysis_dir = output_dir / "analysis"
+        write_text(
+            analysis_dir / "test_fp_fn.md",
+            build_fp_fn_markdown_report(
+                final_test_result.predictions,
+                split_name="test",
+            ),
+        )
+
+        metrics_payload = {
+            "best_epoch": best_epoch,
+            "val": {
+                "loss": final_val_result.loss,
+                **final_val_result.metrics,
+            },
+            "test": {
+                "loss": final_test_result.loss,
+                **final_test_result.metrics,
+                "subsets": final_test_result.subset_metrics,
+            },
         }
-        if test_result.subset_metrics:
-            epoch_summary["test_subsets"] = test_result.subset_metrics
-        history.append(epoch_summary)
+        write_json(output_dir / "metrics.json", metrics_payload)
+
+        log_scalar_tree(
+            writer,
+            prefix="final/val",
+            values={
+                "loss": final_val_result.loss,
+                **final_val_result.metrics,
+            },
+            step=best_epoch,
+        )
+        log_scalar_tree(
+            writer,
+            prefix="final/test",
+            values={
+                "loss": final_test_result.loss,
+                **final_test_result.metrics,
+                "subsets": final_test_result.subset_metrics,
+            },
+            step=best_epoch,
+        )
+        writer.add_scalar("final/best_epoch", float(best_epoch), best_epoch)
+        writer.flush()
+
+        training_summary = {
+            **summary_stub,
+            "best_epoch": best_epoch,
+            "history": history,
+            "final_metrics": metrics_payload,
+        }
+        write_json(output_dir / "training_summary.json", training_summary)
 
         print(
-            f"Epoch {epoch_index} finished | "
-            f"train_loss={train_metrics['loss']:.6f} | "
-            f"val_loss={val_result.loss:.6f} | "
-            f"val_token_f1={val_result.metrics['token_f1']:.4f} | "
-            f"val_span_f1={val_result.metrics['span_f1']:.4f} | "
-            f"test_loss={test_result.loss:.6f} | "
-            f"test_token_f1={test_result.metrics['token_f1']:.4f} | "
-            f"test_span_f1={test_result.metrics['span_f1']:.4f}"
+            f"Best epoch: {best_epoch} | "
+            f"val_span_f1={final_val_result.metrics['span_f1']:.4f} | "
+            f"test_span_f1={final_test_result.metrics['span_f1']:.4f}"
         )
-        if test_result.subset_metrics:
-            print(f"Test subsets | {format_subset_metric_summary(test_result.subset_metrics)}")
-
-        score = (
-            float(val_result.metrics["span_f1"]),
-            float(val_result.metrics["token_f1"]),
-        )
-        if best_score is None or score > best_score:
-            best_score = score
-            best_epoch = epoch_index
-            model.save_pretrained(best_model_dir)
-            tokenizer.save_pretrained(best_model_dir)
-            write_json(
-                output_dir / "best_model_metrics.json",
-                {
-                    "epoch": epoch_index,
-                    "val_loss": val_result.loss,
-                    **val_result.metrics,
-                    "test_loss": test_result.loss,
-                    **prefix_metrics(test_result.metrics, prefix="test_"),
-                    "test_subsets": test_result.subset_metrics,
-                },
+        if final_test_result.subset_metrics:
+            print(
+                "Final test subsets | "
+                f"{format_subset_metric_summary(final_test_result.subset_metrics)}"
             )
-            print(f"Saved new best checkpoint to {best_model_dir}")
-
-    if best_epoch is None:
-        raise RuntimeError("Training finished without producing a best checkpoint.")
-
-    best_model = AutoModelForTokenClassification.from_pretrained(best_model_dir)
-    best_model.to(device)
-
-    final_val_result = evaluate_model(
-        best_model,
-        dataloaders["val"],
-        id_to_label=id_to_label,
-        device=device,
-        amp_dtype=amp_dtype,
-        collect_predictions=True,
-    )
-    final_test_result = evaluate_model(
-        best_model,
-        dataloaders["test"],
-        id_to_label=id_to_label,
-        device=device,
-        amp_dtype=amp_dtype,
-        collect_predictions=True,
-        compute_entity_subset_metrics=True,
-    )
-
-    predictions_dir = output_dir / "predictions"
-    write_jsonl(predictions_dir / "val.jsonl", final_val_result.predictions)
-    write_jsonl(predictions_dir / "test.jsonl", final_test_result.predictions)
-
-    analysis_dir = output_dir / "analysis"
-    write_text(
-        analysis_dir / "test_fp_fn.md",
-        build_fp_fn_markdown_report(
-            final_test_result.predictions,
-            split_name="test",
-        ),
-    )
-
-    metrics_payload = {
-        "best_epoch": best_epoch,
-        "val": {
-            "loss": final_val_result.loss,
-            **final_val_result.metrics,
-        },
-        "test": {
-            "loss": final_test_result.loss,
-            **final_test_result.metrics,
-            "subsets": final_test_result.subset_metrics,
-        },
-    }
-    write_json(output_dir / "metrics.json", metrics_payload)
-
-    training_summary = {
-        **summary_stub,
-        "best_epoch": best_epoch,
-        "history": history,
-        "final_metrics": metrics_payload,
-    }
-    write_json(output_dir / "training_summary.json", training_summary)
-
-    print(
-        f"Best epoch: {best_epoch} | "
-        f"val_span_f1={final_val_result.metrics['span_f1']:.4f} | "
-        f"test_span_f1={final_test_result.metrics['span_f1']:.4f}"
-    )
-    if final_test_result.subset_metrics:
-        print(
-            "Final test subsets | "
-            f"{format_subset_metric_summary(final_test_result.subset_metrics)}"
-        )
-    print(f"Artifacts saved to {output_dir}")
-    return training_summary
+        print(f"Artifacts saved to {output_dir}")
+        return training_summary
+    finally:
+        writer.close()

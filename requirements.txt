@@ -2,3 +2,4 @@ regex>=2024.0.0
 pymorphy3>=2.0.0
 torch>=2.2.0
 transformers>=4.48.0
+tensorboard>=2.14.0
