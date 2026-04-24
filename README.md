@@ -346,6 +346,41 @@ venv/bin/python -m src.models.train \
 - entity span-ы подсвечиваются как `[[...]]`;
 - отдельно списком выписываются только `FP` и `FN` с token offsets.
 
+### 4. Инференс на одном тексте из `txt`
+
+Для запуска инференса на одном тексте можно использовать standalone-скрипт из корня репозитория:
+
+```bash
+venv/bin/python infer_one_text.py \
+  --model-dir outputs/models/rumodernbert_base_04_24_11_04 \
+  --input-path path/to/text.txt
+```
+
+Что поддерживается:
+
+- `--model-dir` можно передать либо как run-директорию `outputs/models/<run_name>`, либо сразу как `outputs/models/<run_name>/best_model`;
+- `--input-path` — это обычный `txt`-файл с одним текстом; текст может занимать несколько строк;
+- скрипт читает файл целиком как один input text;
+- если текст длиннее training `max_length`, скрипт автоматически прогоняет его по перекрывающимся окнам и потом собирает итоговые BIO-предсказания обратно;
+- в stdout печатаются найденные сущности с `char`- и `token`-offset'ами, а также текст с подсветкой `[[...]]`.
+
+При желании можно сохранить полный результат в JSON:
+
+```bash
+venv/bin/python infer_one_text.py \
+  --model-dir outputs/models/rumodernbert_base_04_24_11_04/best_model \
+  --input-path path/to/text.txt \
+  --output-json outputs/inference/result.json
+```
+
+Дополнительно поддерживаются параметры:
+
+- `--device`
+- `--max-length`
+- `--window-overlap-words`
+- `--print-tags`
+- `--hide-highlight`
+
 ## Что уже реализовано
 
 - загрузка и очистка raw texts;
