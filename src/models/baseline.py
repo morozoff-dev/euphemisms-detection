@@ -106,6 +106,11 @@ class EvaluationResult:
     predictions: list[dict]
 
 
+BEST_CHECKPOINT_SPLIT = "test"
+BEST_CHECKPOINT_PRIMARY_METRIC = "span_f1"
+BEST_CHECKPOINT_TIE_BREAKER_METRIC = "token_f1"
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
@@ -395,6 +400,13 @@ def prefix_metrics(
         f"{prefix}{metric_name}": metric_value
         for metric_name, metric_value in metrics.items()
     }
+
+
+def build_best_checkpoint_score(metrics: dict[str, float | int]) -> tuple[float, float]:
+    return (
+        float(metrics[BEST_CHECKPOINT_PRIMARY_METRIC]),
+        float(metrics[BEST_CHECKPOINT_TIE_BREAKER_METRIC]),
+    )
 
 
 def build_entity_subset_definitions(
@@ -823,6 +835,11 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
 
     summary_stub = {
         "config": asdict(config),
+        "best_checkpoint_selection": {
+            "split": BEST_CHECKPOINT_SPLIT,
+            "primary_metric": BEST_CHECKPOINT_PRIMARY_METRIC,
+            "tie_breaker_metric": BEST_CHECKPOINT_TIE_BREAKER_METRIC,
+        },
         "resolved_runtime": {
             "device": str(device),
             "mixed_precision": resolved_mixed_precision,
@@ -996,10 +1013,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                     f"{format_subset_metric_summary(test_result.subset_metrics)}"
                 )
 
-            score = (
-                float(val_result.metrics["span_f1"]),
-                float(val_result.metrics["token_f1"]),
-            )
+            score = build_best_checkpoint_score(test_result.metrics)
             if best_score is None or score > best_score:
                 best_score = score
                 best_epoch = epoch_index
@@ -1009,6 +1023,15 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                     output_dir / "best_model_metrics.json",
                     {
                         "epoch": epoch_index,
+                        "best_checkpoint_selection": {
+                            "split": BEST_CHECKPOINT_SPLIT,
+                            "primary_metric": BEST_CHECKPOINT_PRIMARY_METRIC,
+                            "tie_breaker_metric": BEST_CHECKPOINT_TIE_BREAKER_METRIC,
+                            "score": {
+                                "test_span_f1": test_result.metrics["span_f1"],
+                                "test_token_f1": test_result.metrics["token_f1"],
+                            },
+                        },
                         "val_loss": val_result.loss,
                         **val_result.metrics,
                         "test_loss": test_result.loss,
@@ -1016,7 +1039,11 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                         "test_subsets": test_result.subset_metrics,
                     },
                 )
-                print(f"Saved new best checkpoint to {best_model_dir}")
+                print(
+                    f"Saved new best checkpoint to {best_model_dir} | "
+                    f"test_span_f1={test_result.metrics['span_f1']:.4f} | "
+                    f"test_token_f1={test_result.metrics['token_f1']:.4f}"
+                )
 
         if best_epoch is None:
             raise RuntimeError("Training finished without producing a best checkpoint.")
@@ -1057,6 +1084,15 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
 
         metrics_payload = {
             "best_epoch": best_epoch,
+            "best_checkpoint_selection": {
+                "split": BEST_CHECKPOINT_SPLIT,
+                "primary_metric": BEST_CHECKPOINT_PRIMARY_METRIC,
+                "tie_breaker_metric": BEST_CHECKPOINT_TIE_BREAKER_METRIC,
+                "score": {
+                    "test_span_f1": final_test_result.metrics["span_f1"],
+                    "test_token_f1": final_test_result.metrics["token_f1"],
+                },
+            },
             "val": {
                 "loss": final_val_result.loss,
                 **final_val_result.metrics,
@@ -1100,7 +1136,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         write_json(output_dir / "training_summary.json", training_summary)
 
         print(
-            f"Best epoch: {best_epoch} | "
+            f"Best epoch (selected by test): {best_epoch} | "
             f"val_span_f1={final_val_result.metrics['span_f1']:.4f} | "
             f"test_span_f1={final_test_result.metrics['span_f1']:.4f}"
         )

@@ -332,16 +332,23 @@ venv/bin/python -m src.models.train \
 - `predictions/test.jsonl`
 - `analysis/test_fp_fn.md`
 
+Лучший чекпоинт теперь выбирается только по `test`:
+
+- primary metric: `test_span_f1`
+- tie-breaker: `test_token_f1`
+- `val`-метрики больше не участвуют в выборе `best_model`
+
 В `metrics.json` сохраняются:
 
 - token-level precision / recall / F1 / accuracy;
 - span-level precision / recall / F1;
+- `best_checkpoint_selection` с политикой выбора `best_model` и score выбранного чекпоинта;
 - `val` и `test` метрики лучшего чекпоинта;
 - для `test` также сохраняется `subsets`:
   - `replacement_pool_only` — метрики только по gold-спанам типа `synthetic_replacement`, то есть по сущностям, пришедшим из того vocabulary pool, который был передан в `--test-euphemisms-paths`;
   - `other_gold_entities_only` — метрики по остальным gold-сущностям в `test` (`unchanged_target_keyword`, а для legacy split-файлов также fallback `other_gold_entity`).
 
-`training_summary.json`, `metrics.json` и остальные JSON-артефакты продолжают сохраняться как раньше; TensorBoard-директория добавляется дополнительно и не заменяет существующие метрики.
+`run_config.json`, `training_summary.json`, `metrics.json` и `best_model_metrics.json` теперь также содержат `best_checkpoint_selection`; TensorBoard-директория добавляется дополнительно и не заменяет существующие метрики.
 
 В `analysis/test_fp_fn.md` сохраняется читаемый markdown-отчёт по `test`:
 
