@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from src.data.io import load_lines, resolve_input_path, write_json
-from src.data.text import WORD_RE
+from src.data.text import TOKEN_RE
 
 ENTITY_LABEL = "EUPHEMISM"
 BIO_LABELS = ["O", f"B-{ENTITY_LABEL}", f"I-{ENTITY_LABEL}"]
@@ -249,7 +249,7 @@ def load_split_samples(
 def tokenize_words(text: str) -> list[TokenSpan]:
     return [
         TokenSpan(text=match.group(0), start=match.start(), end=match.end())
-        for match in WORD_RE.finditer(text)
+        for match in TOKEN_RE.finditer(text)
     ]
 
 
@@ -347,7 +347,7 @@ def prepare_sample(
 ) -> BioSample:
     tokens = tokenize_words(sample.text)
     if not tokens:
-        raise ValueError(f"Sample {sample.sample_id} does not contain any word tokens.")
+        raise ValueError(f"Sample {sample.sample_id} does not contain any tokens.")
     bio_tags, token_annotation_kinds = assign_entities_to_tokens(
         tokens,
         sample.entities,
@@ -468,7 +468,7 @@ def build_bio_dataset(
                     prepare_sample(sample, warning_tracker=warning_tracker)
                 )
             except ValueError as exc:
-                if "does not contain any word tokens" not in str(exc):
+                if "does not contain any tokens" not in str(exc):
                     raise
                 dropped_empty_token_samples[sample.source] += 1
         output_rows[split_name] = prepared_rows

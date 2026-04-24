@@ -4,20 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-try:
-    import regex as re_module
-except ImportError:  # pragma: no cover - depends on local environment
-    import re as re_module
-
-
-try:
-    WORD_RE = re_module.compile(r"\p{L}+(?:-\p{L}+)*", flags=re_module.UNICODE)
-except Exception:  # pragma: no cover - stdlib re does not support \p{L}
-    WORD_RE = re_module.compile(r"[^\W\d_]+(?:-[^\W\d_]+)*", flags=re_module.UNICODE)
+from src.data.text import TOKEN_RE, preprocess_text_for_annotation
 
 
 @dataclass(frozen=True)
@@ -80,12 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--window-overlap-words",
         type=int,
         default=32,
-        help="How many words to overlap between inference windows for long texts.",
+        help="How many token units to overlap between inference windows for long texts.",
     )
     parser.add_argument(
         "--print-tags",
         action="store_true",
-        help="Print the predicted BIO tag for every word token.",
+        help="Print the predicted BIO tag for every token unit.",
     )
     parser.add_argument(
         "--hide-highlight",
@@ -96,10 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def clean_input_text(text: str) -> str:
-    return unicodedata.normalize(
-        "NFC",
-        text.replace("\ufeff", "").replace("\u00A0", " "),
-    )
+    return preprocess_text_for_annotation(text)
 
 
 def load_text(path: str | Path) -> str:
@@ -112,7 +99,7 @@ def load_text(path: str | Path) -> str:
 def tokenize_words(text: str) -> list[TokenSpan]:
     return [
         TokenSpan(text=match.group(0), start=match.start(), end=match.end())
-        for match in WORD_RE.finditer(text)
+        for match in TOKEN_RE.finditer(text)
     ]
 
 
@@ -394,7 +381,7 @@ def main() -> int:
         input_text = load_text(args.input_path)
         tokens = tokenize_words(input_text)
         if not tokens:
-            raise ValueError("The input text does not contain any word tokens.")
+            raise ValueError("The input text does not contain any tokens.")
 
         tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir, use_fast=True)
         if not tokenizer.is_fast:

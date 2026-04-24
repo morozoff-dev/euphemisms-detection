@@ -13,8 +13,10 @@
 1. В `src.data_prep` из сырых positive и negative текстов строятся уже готовые split-файлы для датасета:
    - positive texts берутся из `data/drug_texts_small.txt`;
    - negative texts берутся из `data/negatives.txt`;
+   - перед language filter тексты проходят annotation-oriented preprocessing: `NFKC`, удаление zero-width/HTML/entity/emoji, замена `URL` / `email` / `@mention` / телефонов / длинных чисел на маркеры;
    - на раннем preprocessing этапе сохраняются только тексты, для которых `cld2` определяет основной язык как русский (`ru`);
    - если в тексте более 50% букв находятся в верхнем регистре, такой текст полностью переводится в нижний регистр;
+   - пунктуация сохраняется, а числовые токены длиной до 3 цифр остаются в тексте как есть;
    - positive texts с упоминаниями target keywords сэмплируются, как и negatives;
    - positives и negatives независимо режутся на `train/val/test` с сохранением заданного соотношения;
    - target keywords заменяются частично: по умолчанию заменяется 50% найденных mentions, остальные остаются в тексте и тоже размечаются как сущности;
@@ -23,12 +25,12 @@
    - сохраняются `train.json`, `val.json`, `test.json` и `manifest.json`.
 2. В `src.bio` готовые split JSON-файлы переводятся в BIO-датасет:
    - входные `train.json`, `val.json`, `test.json` уже не пересэмпливаются и не режутся заново;
-   - текст разбивается на word-level токены;
+   - текст разбивается на токены, которые сохраняют слова, маркеры, пунктуацию и числа до 3 цифр;
    - по char-level entity span'ам строятся BIO-теги;
    - сохраняются `train.jsonl`, `val.jsonl`, `test.jsonl` и `manifest.json`.
 3. В `src.models.train` на готовом BIO-датасете обучается baseline token-classification модель:
    - берётся `ModernBERT` / `RuModernBERT`;
-   - word-level BIO-теги выравниваются на subword-токены;
+   - BIO-теги из `tokens` выравниваются на subword-токены;
    - считается token-level и span-level F1;
    - для `test` дополнительно считаются отдельные masked-метрики по двум группам gold-сущностей:
      - `replacement_pool_only` — только synthetic replacements, пришедшие из test replacement pool;
@@ -78,7 +80,7 @@
 `manifest.json` для data preparation stage хранит:
 
 - какие входные файлы брались;
-- какие правила раннего preprocessing применялись (`cld2` language filter и lowercasing mostly-uppercase текстов);
+- какие правила раннего preprocessing применялись (`cld2` language filter, lowercasing mostly-uppercase текстов и marker-based text normalization);
 - какие euphemism vocab files использовались для `train/val/test`;
 - сколько positive/negative текстов осталось после preprocessing;
 - какая доля target keyword mentions заменялась;
@@ -99,7 +101,7 @@
 - `sample_id`
 - `source` — `positive` или `negative`
 - `text`
-- `tokens` — word-level токены
+- `tokens` — предтокенизированные единицы для NER: слова, маркеры, пунктуация и числа до 3 цифр
 - `bio_tags` — BIO-разметка для токенов
 - `entities` — entity spans в char-level формате
 - `token_annotation_kinds` — список той же длины, что и `tokens`; для entity-токенов хранит `annotation_kind` (`synthetic_replacement`, `unchanged_target_keyword`), а для legacy split-файлов без явного `annotation_kind` может использовать fallback `other_gold_entity`; для остальных токенов хранит `null`
@@ -163,8 +165,10 @@ outputs/data_prep/splits/
 
 Новый default pipeline делает всё на этапе подготовки данных:
 
+- прогоняет source texts через annotation-oriented preprocessing с маркерами `<URL>`, `<EMAIL>`, `<USER>`, `<PHONE>`, `<BIGNUM>`;
 - оставляет только те positive и negative source texts, для которых `cld2` определяет основной язык как русский;
 - если в тексте больше 50% букв в верхнем регистре, полностью переводит его в lower-case;
+- сохраняет пунктуацию и короткие числовые токены, чтобы они доходили до BIO и BERT;
 - сэмплирует positive и negative source texts;
 - делит их на `train/val/test`;
 - смешивает positives и negatives внутри каждого split;
@@ -203,7 +207,7 @@ venv/bin/python -m src.bio
 - input dir: `outputs/data_prep/splits`
 - output dir: `outputs/bio`
 
-`src.bio` не делает sampling и split. Он только переводит уже готовые `train.json`, `val.json`, `test.json` из этапа подготовки данных в BIO `jsonl`.
+`src.bio` не делает sampling и split. Он только переводит уже готовые `train.json`, `val.json`, `test.json` из этапа подготовки данных в BIO `jsonl`, сохраняя в `tokens` слова, маркеры, пунктуацию и числа до 3 цифр.
 
 Если у вас уже были старые `outputs/bio/*.jsonl`, после обновления кода их нужно один раз пересобрать через `src.bio`, чтобы в датасет попали `token_annotation_kinds` для новых test subset metrics.
 
@@ -351,7 +355,7 @@ venv/bin/python -m src.models.train \
 Для запуска инференса на одном тексте можно использовать standalone-скрипт из корня репозитория:
 
 ```bash
-venv/bin/python infer_one_text.py \
+venv/bin/python scripts/infer_one_text.py \
   --model-dir outputs/models/rumodernbert_base_04_24_11_04 \
   --input-path path/to/text.txt
 ```
@@ -360,14 +364,14 @@ venv/bin/python infer_one_text.py \
 
 - `--model-dir` можно передать либо как run-директорию `outputs/models/<run_name>`, либо сразу как `outputs/models/<run_name>/best_model`;
 - `--input-path` — это обычный `txt`-файл с одним текстом; текст может занимать несколько строк;
-- скрипт читает файл целиком как один input text;
+- скрипт читает файл целиком как один input text и прогоняет его через тот же preprocessing, что и dataset pipeline;
 - если текст длиннее training `max_length`, скрипт автоматически прогоняет его по перекрывающимся окнам и потом собирает итоговые BIO-предсказания обратно;
 - в stdout печатаются найденные сущности с `char`- и `token`-offset'ами, а также текст с подсветкой `[[...]]`.
 
 При желании можно сохранить полный результат в JSON:
 
 ```bash
-venv/bin/python infer_one_text.py \
+venv/bin/python scripts/infer_one_text.py \
   --model-dir outputs/models/rumodernbert_base_04_24_11_04/best_model \
   --input-path path/to/text.txt \
   --output-json outputs/inference/result.json

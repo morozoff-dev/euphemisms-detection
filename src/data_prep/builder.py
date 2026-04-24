@@ -12,10 +12,17 @@ from src.data.language import (
 )
 from src.data.io import load_lines, write_json
 from src.data.text import (
+    BIGNUM_MARKER,
+    EMAIL_MARKER,
+    PHONE_MARKER,
+    SHORT_NUMBER_MAX_DIGITS,
+    URL_MARKER,
+    USER_MARKER,
     WORD_RE,
     lookup_norm,
     lowercase_if_mostly_uppercase,
     nfc,
+    preprocess_text_for_annotation,
 )
 from src.data_prep.morphology import (
     can_inflect_to_plural,
@@ -112,6 +119,7 @@ class SourceTextPreprocessingStats:
     lowercased_mostly_uppercase: int
     kept_russian: int
     dropped_non_russian: int
+    dropped_empty_after_normalization: int
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -127,22 +135,32 @@ def preprocess_source_texts(
     source_texts = list(texts)
     preprocessed_texts: list[str] = []
     lowercased_mostly_uppercase = 0
+    dropped_non_russian = 0
+    dropped_empty_after_normalization = 0
 
     for text in source_texts:
-        normalized_text = lowercase_if_mostly_uppercase(
-            text,
+        normalized_text = preprocess_text_for_annotation(text)
+        if not normalized_text:
+            dropped_empty_after_normalization += 1
+            continue
+
+        lowercased_text = lowercase_if_mostly_uppercase(
+            normalized_text,
             uppercase_letter_ratio_threshold=uppercase_letter_ratio_threshold,
         )
-        if normalized_text != text:
+        if lowercased_text != normalized_text:
             lowercased_mostly_uppercase += 1
-        if is_russian_text(normalized_text):
-            preprocessed_texts.append(normalized_text)
+        if is_russian_text(lowercased_text):
+            preprocessed_texts.append(lowercased_text)
+        else:
+            dropped_non_russian += 1
 
     return preprocessed_texts, SourceTextPreprocessingStats(
         total_input_texts=len(source_texts),
         lowercased_mostly_uppercase=lowercased_mostly_uppercase,
         kept_russian=len(preprocessed_texts),
-        dropped_non_russian=len(source_texts) - len(preprocessed_texts),
+        dropped_non_russian=dropped_non_russian,
+        dropped_empty_after_normalization=dropped_empty_after_normalization,
     )
 
 
@@ -679,6 +697,20 @@ def build_dataset_splits(
             "target_words": target_words_path,
         },
         "preprocessing": {
+            "text_normalization": {
+                "unicode_normalization": "NFKC",
+                "preserve_punctuation": True,
+                "keep_number_tokens_up_to_digits": SHORT_NUMBER_MAX_DIGITS,
+                "replace_with_markers": {
+                    "url": URL_MARKER,
+                    "email": EMAIL_MARKER,
+                    "user": USER_MARKER,
+                    "phone": PHONE_MARKER,
+                    "big_number": BIGNUM_MARKER,
+                },
+                "drop_html": True,
+                "drop_emoji": True,
+            },
             "language_filter": {
                 "detector": "cld2",
                 "keep_primary_language": RUSSIAN_LANGUAGE_CODE,

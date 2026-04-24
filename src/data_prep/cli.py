@@ -125,9 +125,11 @@ def main() -> int:
     print(
         "After preprocessing: "
         f"{preprocessing['positive_texts']['kept_russian']} positive kept "
-        f"(lowercased={preprocessing['positive_texts']['lowercased_mostly_uppercase']}), "
+        f"(lowercased={preprocessing['positive_texts']['lowercased_mostly_uppercase']}, "
+        f"empty={preprocessing['positive_texts']['dropped_empty_after_normalization']}), "
         f"{preprocessing['negative_texts']['kept_russian']} negative kept "
-        f"(lowercased={preprocessing['negative_texts']['lowercased_mostly_uppercase']})"
+        f"(lowercased={preprocessing['negative_texts']['lowercased_mostly_uppercase']}, "
+        f"empty={preprocessing['negative_texts']['dropped_empty_after_normalization']})"
     )
     counts = manifest["counts"]
     print(
