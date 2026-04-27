@@ -90,6 +90,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="AdamW learning rate.",
     )
     parser.add_argument(
+        "--alpha-learning-rate",
+        type=float,
+        default=1e-3,
+        help=(
+            "Learning rate for the learnable combined-head alpha parameter. "
+            "Ignored for baseline and neighbor heads."
+        ),
+    )
+    parser.add_argument(
         "--weight-decay",
         type=float,
         default=0.01,
@@ -193,6 +202,7 @@ def main() -> int:
         train_batch_size=args.train_batch_size,
         eval_batch_size=args.eval_batch_size,
         learning_rate=args.learning_rate,
+        alpha_learning_rate=args.alpha_learning_rate,
         weight_decay=args.weight_decay,
         warmup_ratio=args.warmup_ratio,
         grad_accumulation_steps=args.grad_accumulation_steps,

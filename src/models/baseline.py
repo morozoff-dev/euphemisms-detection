@@ -59,6 +59,7 @@ class BaselineTrainingConfig:
     train_batch_size: int = 8
     eval_batch_size: int = 16
     learning_rate: float = 3e-5
+    alpha_learning_rate: float = 1e-3
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
     grad_accumulation_steps: int = 1
@@ -405,6 +406,15 @@ def build_tensorboard_custom_scalar_layout() -> dict[str, dict[str, list[Any]]]:
                 ],
             ],
         },
+        "Alpha": {
+            "Combined Head Alpha": [
+                "Multiline",
+                [
+                    "epoch/model/alpha",
+                    "final/model/alpha",
+                ],
+            ],
+        },
         "Subset Span F1": {
             "Test Subsets": [
                 "Multiline",
@@ -475,6 +485,44 @@ def format_subset_metric_summary(
         if subset_name in subset_metrics
     ]
     return " | ".join(parts)
+
+
+def build_optimizer(
+    model: torch.nn.Module,
+    config: BaselineTrainingConfig,
+) -> AdamW:
+    if config.head_mode != "combined":
+        return AdamW(
+            model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+        )
+
+    alpha_parameter = getattr(model, "raw_alpha", None)
+    if alpha_parameter is None:
+        raise RuntimeError("Combined head is missing the learnable raw_alpha parameter.")
+
+    base_parameters = [
+        parameter
+        for name, parameter in model.named_parameters()
+        if name != "raw_alpha"
+    ]
+    return AdamW(
+        [
+            {
+                "params": base_parameters,
+                "lr": config.learning_rate,
+                "weight_decay": config.weight_decay,
+            },
+            {
+                "params": [alpha_parameter],
+                "lr": config.alpha_learning_rate,
+                "weight_decay": 0.0,
+            },
+        ],
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay,
+    )
 
 
 def build_short_model_name(model_name_or_path: str) -> str:
@@ -854,11 +902,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
     total_training_steps = steps_per_epoch * config.epochs
     warmup_steps = int(total_training_steps * config.warmup_ratio)
 
-    optimizer = AdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-    )
+    optimizer = build_optimizer(model, config)
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
@@ -905,6 +949,8 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
     print(f"Run directory: {output_dir}")
     print(f"Training device: {device}")
     print(f"Head mode: {config.head_mode}")
+    if config.head_mode == "combined":
+        print(f"Alpha learning rate: {config.alpha_learning_rate}")
     print(
         "Model parameters: "
         f"total={parameter_counts['total']}, trainable={parameter_counts['trainable']}"
@@ -928,6 +974,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                 "eval_batch_size": config.eval_batch_size,
                 "learning_rate": config.learning_rate,
                 "weight_decay": config.weight_decay,
+                "alpha_learning_rate": config.alpha_learning_rate,
                 "warmup_ratio": config.warmup_ratio,
                 "grad_accumulation_steps": config.grad_accumulation_steps,
                 "max_grad_norm": config.max_grad_norm,
@@ -1035,8 +1082,19 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                 },
                 step=epoch_index,
             )
+            log_scalar_tree(
+                writer,
+                prefix="epoch/model",
+                values={
+                    "alpha": epoch_summary["alpha"],
+                },
+                step=epoch_index,
+            )
             writer.flush()
 
+            alpha_message = ""
+            if epoch_summary["alpha"] is not None:
+                alpha_message = f" | alpha={epoch_summary['alpha']:.6f}"
             print(
                 f"Epoch {epoch_index} finished | "
                 f"train_loss={train_metrics['loss']:.6f} | "
@@ -1046,6 +1104,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                 f"test_loss={test_result.loss:.6f} | "
                 f"test_token_f1={test_result.metrics['token_f1']:.4f} | "
                 f"test_span_f1={test_result.metrics['span_f1']:.4f}"
+                f"{alpha_message}"
             )
             if test_result.subset_metrics:
                 print(
@@ -1180,6 +1239,14 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             step=best_epoch,
         )
         writer.add_scalar("final/best_epoch", float(best_epoch), best_epoch)
+        log_scalar_tree(
+            writer,
+            prefix="final/model",
+            values={
+                "alpha": final_model_metadata["alpha"],
+            },
+            step=best_epoch,
+        )
         writer.flush()
 
         training_summary = {

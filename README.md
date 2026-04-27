@@ -249,6 +249,8 @@ venv/bin/python -m src.models.train \
 - `neighbor` — для word-start токена берутся contextualized states соседних word-start токенов; два соседа усредняются, один сосед берётся как есть, для single-word input используется zero-vector;
 - `combined` — `alpha * baseline_logit + (1 - alpha) * neighbor_logit`, где `alpha = sigmoid(raw_alpha)`, а `raw_alpha` стартует с `0.0`.
 
+Для `combined` параметр `raw_alpha` остаётся обучаемым, но получает отдельный learning rate через `--alpha-learning-rate` (`1e-3` по умолчанию), без weight decay.
+
 Важно: `neighbor` не является строгим context-only head в смысле полностью независимого контекста. Он не использует hidden state текущего word-start токена напрямую, но соседние hidden states уже contextualized encoder states и могут содержать информацию о текущем токене через self-attention.
 
 Запуски experimental heads отличаются только `--head-mode`:
@@ -292,11 +294,13 @@ venv/bin/tensorboard --logdir outputs/models
 В TensorBoard сохраняются:
 
 - `epoch/train/*`, `epoch/val/*`, `epoch/test/*` — epoch-level метрики для train/val/test;
+- `epoch/model/alpha` — значение `alpha` для `combined` head по эпохам;
 - `epoch/test/subsets/*` — subset-метрики для `replacement_pool_only` и `other_gold_entities_only`;
 - в TensorBoard Custom Scalars дополнительно собираются сравнительные графики:
   - `train/val/test loss`;
   - `val/test token F1`;
   - `val/test span F1`;
+  - `combined head alpha`;
   - `test subset span F1`;
 - `final/val/*` и `final/test/*` — финальные метрики лучшего чекпоинта.
 
@@ -344,6 +348,7 @@ venv/bin/python -m src.models.train \
 - `--train-batch-size`
 - `--eval-batch-size`
 - `--learning-rate`
+- `--alpha-learning-rate`
 - `--weight-decay`
 - `--warmup-ratio`
 - `--grad-accumulation-steps`
