@@ -27,8 +27,8 @@ from src.models import (
     build_tokenizer,
 )
 from src.bio.converter import (
-    BIO_LABELS,
     DEFAULT_BIO_OUTPUT_DIR,
+    TOKEN_LABELS,
     BioDataset,
     BioSample,
 )
@@ -192,7 +192,7 @@ class PreparedTokenClassificationDataset(Dataset):
             max_word_tokens = max(max_word_tokens, len(sample.tokens))
             if len(sample.token_annotation_kinds) != len(sample.tokens):
                 raise ValueError(
-                    "Each BIO sample must provide token_annotation_kinds aligned with tokens."
+                    "Each token-label sample must provide token_annotation_kinds aligned with tokens."
                 )
             encoding = tokenizer(
                 sample.tokens,
@@ -565,8 +565,8 @@ def evaluate_model(
             token_annotation_kind_sequences,
         ):
             raise RuntimeError(
-                "Test subset metrics require BIO samples with token_annotation_kinds. "
-                "Rebuild the BIO dataset with `venv/bin/python -m src.bio` "
+                "Test subset metrics require token-label samples with token_annotation_kinds. "
+                "Rebuild the token-label dataset with `venv/bin/python -m src.bio` "
                 "from split JSON files that still contain `euphemisms` metadata."
             )
 
@@ -715,7 +715,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
     output_dir.mkdir(parents=True, exist_ok=False)
     tensorboard_dir = output_dir / "tensorboard"
 
-    label_to_id = {label: index for index, label in enumerate(BIO_LABELS)}
+    label_to_id = {label: index for index, label in enumerate(TOKEN_LABELS)}
     id_to_label = {index: label for label, index in label_to_id.items()}
 
     try:
@@ -727,7 +727,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         )
         model = build_token_classifier(
             model_name_or_path=config.model_name,
-            num_labels=len(BIO_LABELS),
+            num_labels=len(TOKEN_LABELS),
             id2label=id_to_label,
             label2id=label_to_id,
             model_revision=config.model_revision,

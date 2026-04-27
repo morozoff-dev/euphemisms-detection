@@ -75,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--print-tags",
         action="store_true",
-        help="Print the predicted BIO tag for every token unit.",
+        help="Print the predicted token label for every token unit.",
     )
     parser.add_argument(
         "--hide-highlight",
@@ -155,7 +155,7 @@ def resolve_device(requested_device: str, torch_module):
     return device
 
 
-def normalize_bio_tags(tags: list[str]) -> list[str]:
+def normalize_token_labels(tags: list[str]) -> list[str]:
     normalized: list[str] = []
     active_label: str | None = None
 
@@ -167,8 +167,9 @@ def normalize_bio_tags(tags: list[str]) -> list[str]:
 
         prefix, _, entity_label = tag.partition("-")
         if not entity_label:
-            prefix = "B"
-            entity_label = tag
+            normalized.append(tag)
+            active_label = tag
+            continue
 
         if prefix not in {"B", "I"}:
             prefix = "B"
@@ -183,7 +184,7 @@ def normalize_bio_tags(tags: list[str]) -> list[str]:
     return normalized
 
 
-def bio_tags_to_token_spans(tags: list[str]) -> list[tuple[str, int, int]]:
+def token_labels_to_token_spans(tags: list[str]) -> list[tuple[str, int, int]]:
     spans: list[tuple[str, int, int]] = []
     active_label: str | None = None
     active_start: int | None = None
@@ -225,7 +226,7 @@ def build_predicted_spans(
     tags: list[str],
 ) -> list[PredictedSpan]:
     spans: list[PredictedSpan] = []
-    for label, start_token, end_token in bio_tags_to_token_spans(tags):
+    for label, start_token, end_token in token_labels_to_token_spans(tags):
         start_char = tokens[start_token].start
         end_char = tokens[end_token - 1].end
         spans.append(
@@ -345,7 +346,7 @@ def predict_tags_for_tokens(
         id2label[int(label_id)]
         for label_id in average_scores.argmax(dim=-1).tolist()
     ]
-    return normalize_bio_tags(raw_tags), chunk_count
+    return normalize_token_labels(raw_tags), chunk_count
 
 
 def write_json(path: str | Path, payload: dict) -> None:
@@ -449,7 +450,7 @@ def main() -> int:
 
         if args.print_tags:
             print()
-            print("Токены и BIO-теги:")
+            print("Токены и теги:")
             for index, (token, tag) in enumerate(
                 zip((token.text for token in tokens), predicted_tags),
                 start=0,

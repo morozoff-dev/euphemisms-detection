@@ -10,7 +10,8 @@ from src.data.io import load_lines, resolve_input_path, write_json
 from src.data.text import TOKEN_RE
 
 ENTITY_LABEL = "EUPHEMISM"
-BIO_LABELS = ["O", f"B-{ENTITY_LABEL}", f"I-{ENTITY_LABEL}"]
+TOKEN_LABELS = ["O", ENTITY_LABEL]
+BIO_LABELS = TOKEN_LABELS
 MAX_ALIGNMENT_WARNING_EXAMPLES = 20
 DEFAULT_DATA_PREP_SPLITS_DIR = "outputs/data_prep/splits"
 DEFAULT_BIO_OUTPUT_DIR = "outputs/bio"
@@ -86,7 +87,7 @@ class AlignmentWarningTracker:
         token_texts = [token.text for token in covered_tokens]
         warnings.warn(
             "Осторожнее: char-level span нечётко совпадает с границами токенов. "
-            "BIO-разметка будет построена по overlap-логике. "
+            "Token-level разметка будет построена по overlap-логике. "
             f"sample_id={sample_id}, span=[{entity.start}, {entity.end}), "
             f"entity_text={entity.text!r}, covered_tokens={token_texts!r}, "
             f"context={context!r}",
@@ -309,14 +310,12 @@ def assign_entities_to_tokens(
                     covered_tokens=covered_tokens,
                     text=text,
                 )
-        for offset, token_index in enumerate(covered_indices):
+        for token_index in covered_indices:
             if labels[token_index] != "O":
                 raise ValueError(
                     f"Overlapping entities detected around token index {token_index}."
                 )
-            labels[token_index] = (
-                f"B-{ENTITY_LABEL}" if offset == 0 else f"I-{ENTITY_LABEL}"
-            )
+            labels[token_index] = ENTITY_LABEL
             token_annotation_kinds[token_index] = entity.annotation_kind
 
     return labels, token_annotation_kinds
@@ -386,6 +385,8 @@ def build_manifest(
 ) -> dict:
     return {
         "entity_label": ENTITY_LABEL,
+        "label_scheme": "binary_token",
+        "token_labels": TOKEN_LABELS,
         "bio_labels": BIO_LABELS,
         "input_paths": {
             split_name: str(path)

@@ -29,7 +29,7 @@ def _f1_from_counts(tp: int, fp: int, fn: int) -> dict[str, float | int]:
     }
 
 
-def bio_tags_to_spans(tags: Sequence[str]) -> set[tuple[str, int, int]]:
+def token_labels_to_spans(tags: Sequence[str]) -> set[tuple[str, int, int]]:
     spans: set[tuple[str, int, int]] = set()
     active_label: str | None = None
     active_start: int | None = None
@@ -64,6 +64,10 @@ def bio_tags_to_spans(tags: Sequence[str]) -> set[tuple[str, int, int]]:
     return spans
 
 
+def bio_tags_to_spans(tags: Sequence[str]) -> set[tuple[str, int, int]]:
+    return token_labels_to_spans(tags)
+
+
 def span_to_dict(
     span: tuple[str, int, int],
     *,
@@ -87,7 +91,7 @@ def render_tokens_with_highlights(
     if len(tokens) != len(tags):
         raise ValueError("Tokens and tags must have the same length.")
 
-    spans = _sorted_spans(bio_tags_to_spans(tags))
+    spans = _sorted_spans(token_labels_to_spans(tags))
     span_starts = {start: span for span in spans for start in [span[1]]}
     span_ends = {end: span for span in spans for end in [span[2]]}
 
@@ -128,8 +132,8 @@ def build_fp_fn_record(
     if len(tokens) != len(gold_tags) or len(tokens) != len(predicted_tags):
         raise ValueError("Tokens, gold tags, and predicted tags must be aligned.")
 
-    gold_spans = bio_tags_to_spans(gold_tags)
-    predicted_spans = bio_tags_to_spans(predicted_tags)
+    gold_spans = token_labels_to_spans(gold_tags)
+    predicted_spans = token_labels_to_spans(predicted_tags)
     fp_spans = _sorted_spans(predicted_spans - gold_spans)
     fn_spans = _sorted_spans(gold_spans - predicted_spans)
 
@@ -325,8 +329,8 @@ def compute_span_metrics(
     predicted_span_count = 0
 
     for gold_tags, predicted_tags in zip(gold_sequences, predicted_sequences):
-        gold_spans = bio_tags_to_spans(gold_tags)
-        predicted_spans = bio_tags_to_spans(predicted_tags)
+        gold_spans = token_labels_to_spans(gold_tags)
+        predicted_spans = token_labels_to_spans(predicted_tags)
         true_positive += len(gold_spans & predicted_spans)
         false_positive += len(predicted_spans - gold_spans)
         false_negative += len(gold_spans - predicted_spans)

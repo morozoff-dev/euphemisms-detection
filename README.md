@@ -23,14 +23,14 @@
    - в `train/val` positives используют `generated_slang_euphemisms.txt` как replacement pool;
    - в `test` positives используют `generated_euphemisms.txt` как replacement pool;
    - сохраняются `train.json`, `val.json`, `test.json` и `manifest.json`.
-2. В `src.bio` готовые split JSON-файлы переводятся в BIO-датасет:
+2. В `src.bio` готовые split JSON-файлы переводятся в бинарный token-label датасет:
    - входные `train.json`, `val.json`, `test.json` уже не пересэмпливаются и не режутся заново;
    - текст разбивается на токены, которые сохраняют слова, маркеры, пунктуацию и числа до 3 цифр;
-   - по char-level entity span'ам строятся BIO-теги;
+   - по char-level entity span'ам строятся два token-level тега: `O` и `EUPHEMISM`;
    - сохраняются `train.jsonl`, `val.jsonl`, `test.jsonl` и `manifest.json`.
-3. В `src.models.train` на готовом BIO-датасете обучается baseline token-classification модель:
+3. В `src.models.train` на готовом token-label датасете обучается baseline token-classification модель:
    - берётся `ModernBERT` / `RuModernBERT`;
-   - BIO-теги из `tokens` выравниваются на subword-токены;
+   - token-level теги из `tokens` выравниваются на subword-токены;
    - считается token-level и span-level F1;
    - для `test` дополнительно считаются отдельные masked-метрики по двум группам gold-сущностей:
      - `replacement_pool_only` — только synthetic replacements, пришедшие из test replacement pool;
@@ -44,10 +44,10 @@
 - `data/` — входные данные
 - `src/data/` — загрузка и очистка текста
 - `src/data_prep/` — подготовка data split'ов
-- `src/bio/` — BIO-конвертация split JSON
+- `src/bio/` — token-label конвертация split JSON
 - `src/models/` — загрузка transformer-моделей, метрики и baseline training
 - `outputs/data_prep/` — подготовленные split JSON-файлы
-- `outputs/bio/` — BIO-датасет
+- `outputs/bio/` — token-label датасет
 - `outputs/models/` — чекпоинты, метрики и предсказания моделей
 
 ## Форматы данных
@@ -66,7 +66,7 @@
 - `sample_id`
 - `source` — `positive` или `negative`
 - `source_index`
-- `text` — итоговый текст, который потом пойдёт в BIO-конвертацию
+- `text` — итоговый текст, который потом пойдёт в token-label конвертацию
 - `entities` — список entity span-ов
 
 Для positive samples дополнительно сохраняются:
@@ -87,7 +87,7 @@
 - сколько positive/negative примеров было до и после sampling;
 - как распределились данные по `train/val/test`.
 
-### BIO Dataset
+### Token-label Dataset
 
 После запуска `src.bio` создаются:
 
@@ -102,11 +102,11 @@
 - `source` — `positive` или `negative`
 - `text`
 - `tokens` — предтокенизированные единицы для NER: слова, маркеры, пунктуация и числа до 3 цифр
-- `bio_tags` — BIO-разметка для токенов
+- `bio_tags` — token-level разметка для токенов; поле сохранило старое имя для совместимости, но теперь содержит только `O` или `EUPHEMISM`
 - `entities` — entity spans в char-level формате
 - `token_annotation_kinds` — список той же длины, что и `tokens`; для entity-токенов хранит `annotation_kind` (`synthetic_replacement`, `unchanged_target_keyword`), а для legacy split-файлов без явного `annotation_kind` может использовать fallback `other_gold_entity`; для остальных токенов хранит `null`
 
-`manifest.json` для BIO-конвертации хранит:
+`manifest.json` для token-label конвертации хранит:
 
 - какие входные split JSON-файлы брались;
 - сколько sample-ов было во входных и выходных split'ах;
@@ -168,7 +168,7 @@ outputs/data_prep/splits/
 - прогоняет source texts через annotation-oriented preprocessing с маркерами `<URL>`, `<EMAIL>`, `<USER>`, `<PHONE>`, `<BIGNUM>`;
 - оставляет только те positive и negative source texts, для которых `cld2` определяет основной язык как русский;
 - если в тексте больше 50% букв в верхнем регистре, полностью переводит его в lower-case;
-- сохраняет пунктуацию и короткие числовые токены, чтобы они доходили до BIO и BERT;
+- сохраняет пунктуацию и короткие числовые токены, чтобы они доходили до token-label датасета и BERT;
 - сэмплирует positive и negative source texts;
 - делит их на `train/val/test`;
 - смешивает positives и negatives внутри каждого split;
@@ -194,7 +194,7 @@ venv/bin/python -m src.data_prep \
 
 Если нужно поменять negatives или euphemism vocab files, это теперь делается здесь, на этапе подготовки данных.
 
-### 2. Преобразовать Split JSON в BIO
+### 2. Преобразовать Split JSON в token-label датасет
 
 Минимальный запуск:
 
@@ -207,9 +207,9 @@ venv/bin/python -m src.bio
 - input dir: `outputs/data_prep/splits`
 - output dir: `outputs/bio`
 
-`src.bio` не делает sampling и split. Он только переводит уже готовые `train.json`, `val.json`, `test.json` из этапа подготовки данных в BIO `jsonl`, сохраняя в `tokens` слова, маркеры, пунктуацию и числа до 3 цифр.
+`src.bio` не делает sampling и split. Он только переводит уже готовые `train.json`, `val.json`, `test.json` из этапа подготовки данных в token-label `jsonl`, сохраняя в `tokens` слова, маркеры, пунктуацию и числа до 3 цифр.
 
-Если у вас уже были старые `outputs/bio/*.jsonl`, после обновления кода их нужно один раз пересобрать через `src.bio`, чтобы в датасет попали `token_annotation_kinds` для новых test subset metrics.
+Если у вас уже были старые `outputs/bio/*.jsonl`, после обновления кода их нужно один раз пересобрать через `src.bio`, чтобы теги стали бинарными (`O` / `EUPHEMISM`) и в датасет попали `token_annotation_kinds` для test subset metrics.
 
 Обычный запуск:
 
@@ -372,7 +372,7 @@ venv/bin/python scripts/infer_one_text.py \
 - `--model-dir` можно передать либо как run-директорию `outputs/models/<run_name>`, либо сразу как `outputs/models/<run_name>/best_model`;
 - `--input-path` — это обычный `txt`-файл с одним текстом; текст может занимать несколько строк;
 - скрипт читает файл целиком как один input text и прогоняет его через тот же preprocessing, что и dataset pipeline;
-- если текст длиннее training `max_length`, скрипт автоматически прогоняет его по перекрывающимся окнам и потом собирает итоговые BIO-предсказания обратно;
+- если текст длиннее training `max_length`, скрипт автоматически прогоняет его по перекрывающимся окнам и потом собирает итоговые token-label предсказания обратно;
 - в stdout печатаются найденные сущности с `char`- и `token`-offset'ами, а также текст с подсветкой `[[...]]`.
 
 При желании можно сохранить полный результат в JSON:
@@ -398,7 +398,7 @@ venv/bin/python scripts/infer_one_text.py \
 - поиск канонических форм по словарю;
 - морфологически согласованная подстановка эвфемизмов;
 - подготовка data split dataset с positives и negatives;
-- преобразование split JSON в BIO-датасет;
+- преобразование split JSON в token-label датасет;
 - baseline training loop для `ModernBERT` / `RuModernBERT` в `src.models`;
 - token-level и span-level evaluation;
 - сохранение лучшего чекпоинта, predictions и metrics;

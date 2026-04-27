@@ -11,7 +11,10 @@ from src.bio.converter import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Convert pre-split data preparation JSON files into BIO train/val/test files."
+        description=(
+            "Convert pre-split data preparation JSON files into binary "
+            "token-label train/val/test files."
+        )
     )
     parser.add_argument(
         "--input-dir",
@@ -36,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         default=DEFAULT_BIO_OUTPUT_DIR,
-        help="Directory where BIO jsonl files will be stored.",
+        help="Directory where token-label jsonl files will be stored.",
     )
     return parser
 
@@ -53,7 +56,7 @@ def main() -> int:
         test_path=args.test_path,
         output_dir=args.output_dir,
     )
-    print(f"Prepared BIO dataset in {args.output_dir}")
+    print(f"Prepared token-label dataset in {args.output_dir}")
     counts = manifest["counts"]["output_splits"]
     print(
         "Dropped empty-token samples: "
