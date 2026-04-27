@@ -8,7 +8,7 @@ from src.bio import DEFAULT_BIO_OUTPUT_DIR
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train a ModernBERT/RuModernBERT token classification baseline."
+        description="Train a ModernBERT/RuModernBERT binary token classifier."
     )
     parser.add_argument(
         "--dataset-dir",
@@ -30,6 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional Hugging Face tokenizer id or local path. "
         "If omitted, the model name/path is used.",
+    )
+    parser.add_argument(
+        "--head-mode",
+        choices=("baseline", "neighbor", "combined"),
+        default="baseline",
+        help="Model head mode: baseline, neighbor, or combined.",
     )
     parser.add_argument(
         "--model-revision",
@@ -177,6 +183,7 @@ def main() -> int:
         output_dir=args.output_dir,
         model_name=args.model_name,
         tokenizer_name=args.tokenizer_name,
+        head_mode=args.head_mode,
         model_revision=args.model_revision,
         tokenizer_revision=args.tokenizer_revision,
         cache_dir=args.cache_dir,

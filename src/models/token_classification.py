@@ -4,6 +4,12 @@ from pathlib import Path
 
 from transformers import AutoModelForTokenClassification, AutoTokenizer
 
+from src.models.heads import (
+    AUTO_HEAD_MODE,
+    EuphemismTokenClassifier,
+    resolve_checkpoint_head_info,
+)
+
 
 def is_local_reference(reference: str) -> bool:
     return Path(reference).exists()
@@ -68,6 +74,37 @@ def build_token_classifier(
     num_labels: int,
     id2label: dict[int, str],
     label2id: dict[str, int],
+    head_mode: str = "baseline",
+    positive_label_id: int = 1,
+    model_revision: str | None = None,
+    cache_dir: str | None = None,
+):
+    if num_labels != 2:
+        raise ValueError(
+            "The euphemism token classifier is binary and expects exactly 2 labels."
+        )
+    return EuphemismTokenClassifier.from_encoder_pretrained(
+        model_name_or_path,
+        id2label=id2label,
+        label2id=label2id,
+        head_mode=head_mode,
+        positive_label_id=positive_label_id,
+        model_revision=model_revision,
+        cache_dir=cache_dir,
+        pretrained_kwargs=_build_pretrained_kwargs(
+            model_name_or_path,
+            revision=model_revision,
+            cache_dir=cache_dir,
+        ),
+    )
+
+
+def build_legacy_token_classifier(
+    *,
+    model_name_or_path: str,
+    num_labels: int,
+    id2label: dict[int, str],
+    label2id: dict[str, int],
     model_revision: str | None = None,
     cache_dir: str | None = None,
 ):
@@ -83,6 +120,18 @@ def build_token_classifier(
             cache_dir=cache_dir,
         ),
     )
+
+
+def checkpoint_uses_word_start_mask(
+    checkpoint_dir: str | Path,
+    *,
+    requested_head_mode: str = AUTO_HEAD_MODE,
+) -> bool:
+    metadata = resolve_checkpoint_head_info(
+        checkpoint_dir,
+        requested_head_mode=requested_head_mode,
+    )
+    return not metadata.is_legacy
 
 
 def build_download_help_message(

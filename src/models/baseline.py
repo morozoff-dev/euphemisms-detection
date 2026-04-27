@@ -15,19 +15,22 @@ import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import (
-    AutoModelForTokenClassification,
     DataCollatorForTokenClassification,
     get_linear_schedule_with_warmup,
 )
 
 from src.data.io import write_json
 from src.models import (
+    HEAD_MODES,
+    build_model_metadata,
     build_download_help_message,
     build_token_classifier,
     build_tokenizer,
+    load_token_classifier_checkpoint,
 )
 from src.bio.converter import (
     DEFAULT_BIO_OUTPUT_DIR,
+    ENTITY_LABEL,
     TOKEN_LABELS,
     BioDataset,
     BioSample,
@@ -46,6 +49,7 @@ class BaselineTrainingConfig:
     output_dir: str = "outputs/models"
     model_name: str = "deepvk/RuModernBERT-base"
     tokenizer_name: str | None = None
+    head_mode: str = "baseline"
     model_revision: str | None = None
     tokenizer_revision: str | None = None
     cache_dir: str | None = None
@@ -209,20 +213,24 @@ class PreparedTokenClassificationDataset(Dataset):
                 )
 
             labels: list[int] = []
+            word_start_mask: list[int] = []
             first_token_positions: list[int] = []
             kept_word_indices: list[int] = []
             previous_word_id: int | None = None
             for position, word_id in enumerate(word_ids):
                 if word_id is None:
                     labels.append(-100)
+                    word_start_mask.append(0)
                     continue
                 if word_id != previous_word_id:
                     first_token_positions.append(position)
                     kept_word_indices.append(word_id)
                     labels.append(label_to_id[sample.bio_tags[word_id]])
+                    word_start_mask.append(1)
                     previous_word_id = word_id
                 else:
                     labels.append(-100)
+                    word_start_mask.append(0)
 
             if not kept_word_indices:
                 dropped_empty_after_tokenization += 1
@@ -244,6 +252,7 @@ class PreparedTokenClassificationDataset(Dataset):
 
             feature = {key: value for key, value in encoding.items()}
             feature["labels"] = labels
+            feature["word_start_mask"] = word_start_mask
             feature["_metadata"] = EncodedSampleMetadata(
                 sample_id=sample.sample_id,
                 source=sample.source,
@@ -278,11 +287,28 @@ class PreparedTokenClassificationDataset(Dataset):
 
 class TokenClassificationCollator:
     def __init__(self, tokenizer) -> None:
+        self._tokenizer = tokenizer
         self._collator = DataCollatorForTokenClassification(tokenizer=tokenizer)
 
     def __call__(self, features: list[dict]) -> dict:
         metadata = [feature.pop("_metadata") for feature in features]
+        word_start_masks = [feature.pop("word_start_mask") for feature in features]
         batch = self._collator(features)
+        sequence_length = int(batch["input_ids"].shape[1])
+        padded_word_start_masks: list[list[int]] = []
+        for mask in word_start_masks:
+            padding_length = sequence_length - len(mask)
+            if padding_length < 0:
+                raise RuntimeError("word_start_mask is longer than padded input_ids.")
+            if self._tokenizer.padding_side == "right":
+                padded_mask = list(mask) + [0] * padding_length
+            else:
+                padded_mask = [0] * padding_length + list(mask)
+            padded_word_start_masks.append(padded_mask)
+        batch["word_start_mask"] = torch.tensor(
+            padded_word_start_masks,
+            dtype=torch.long,
+        )
         batch["metadata"] = metadata
         return batch
 
@@ -698,6 +724,8 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         raise ValueError("Max sequence length must be positive.")
     if config.overflow_handling not in {"drop", "truncate"}:
         raise ValueError("Overflow handling must be either 'drop' or 'truncate'.")
+    if config.head_mode not in HEAD_MODES:
+        raise ValueError("Head mode must be one of: baseline, neighbor, combined.")
 
     set_seed(config.seed)
     device = resolve_device(config.device)
@@ -717,6 +745,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
 
     label_to_id = {label: index for index, label in enumerate(TOKEN_LABELS)}
     id_to_label = {index: label for label, index in label_to_id.items()}
+    positive_label_id = label_to_id[ENTITY_LABEL]
 
     try:
         tokenizer, resolved_tokenizer_revision = build_tokenizer(
@@ -730,6 +759,8 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             num_labels=len(TOKEN_LABELS),
             id2label=id_to_label,
             label2id=label_to_id,
+            head_mode=config.head_mode,
+            positive_label_id=positive_label_id,
             model_revision=config.model_revision,
             cache_dir=config.cache_dir,
         )
@@ -746,6 +777,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
 
     model.to(device)
     parameter_counts = count_model_parameters(model)
+    initial_model_metadata = build_model_metadata(model)
 
     available_samples = {
         split_name: load_split_samples(config.dataset_dir, split=split_name)
@@ -835,6 +867,11 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
 
     summary_stub = {
         "config": asdict(config),
+        "head_mode": initial_model_metadata["head_mode"],
+        "model_architecture": initial_model_metadata["model_architecture"],
+        "positive_label_id": initial_model_metadata["positive_label_id"],
+        "alpha": initial_model_metadata["alpha"],
+        "model": initial_model_metadata,
         "best_checkpoint_selection": {
             "split": BEST_CHECKPOINT_SPLIT,
             "primary_metric": BEST_CHECKPOINT_PRIMARY_METRIC,
@@ -867,6 +904,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
 
     print(f"Run directory: {output_dir}")
     print(f"Training device: {device}")
+    print(f"Head mode: {config.head_mode}")
     print(
         "Model parameters: "
         f"total={parameter_counts['total']}, trainable={parameter_counts['trainable']}"
@@ -957,6 +995,8 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                 "train_loss": train_metrics["loss"],
                 "train_optimizer_steps": train_metrics["optimizer_steps"],
                 "train_elapsed_seconds": train_metrics["elapsed_seconds"],
+                "head_mode": config.head_mode,
+                "alpha": build_model_metadata(model)["alpha"],
                 "val_loss": val_result.loss,
                 **val_result.metrics,
                 "test_loss": test_result.loss,
@@ -1017,12 +1057,18 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             if best_score is None or score > best_score:
                 best_score = score
                 best_epoch = epoch_index
+                best_model_metadata = build_model_metadata(model)
                 model.save_pretrained(best_model_dir)
                 tokenizer.save_pretrained(best_model_dir)
                 write_json(
                     output_dir / "best_model_metrics.json",
                     {
                         "epoch": epoch_index,
+                        "head_mode": best_model_metadata["head_mode"],
+                        "model_architecture": best_model_metadata["model_architecture"],
+                        "positive_label_id": best_model_metadata["positive_label_id"],
+                        "alpha": best_model_metadata["alpha"],
+                        "model": best_model_metadata,
                         "best_checkpoint_selection": {
                             "split": BEST_CHECKPOINT_SPLIT,
                             "primary_metric": BEST_CHECKPOINT_PRIMARY_METRIC,
@@ -1048,8 +1094,12 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         if best_epoch is None:
             raise RuntimeError("Training finished without producing a best checkpoint.")
 
-        best_model = AutoModelForTokenClassification.from_pretrained(best_model_dir)
+        best_model, _ = load_token_classifier_checkpoint(
+            best_model_dir,
+            requested_head_mode=config.head_mode,
+        )
         best_model.to(device)
+        final_model_metadata = build_model_metadata(best_model)
 
         final_val_result = evaluate_model(
             best_model,
@@ -1084,6 +1134,11 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
 
         metrics_payload = {
             "best_epoch": best_epoch,
+            "head_mode": final_model_metadata["head_mode"],
+            "model_architecture": final_model_metadata["model_architecture"],
+            "positive_label_id": final_model_metadata["positive_label_id"],
+            "alpha": final_model_metadata["alpha"],
+            "model": final_model_metadata,
             "best_checkpoint_selection": {
                 "split": BEST_CHECKPOINT_SPLIT,
                 "primary_metric": BEST_CHECKPOINT_PRIMARY_METRIC,
@@ -1129,10 +1184,26 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
 
         training_summary = {
             **summary_stub,
+            "head_mode": final_model_metadata["head_mode"],
+            "model_architecture": final_model_metadata["model_architecture"],
+            "positive_label_id": final_model_metadata["positive_label_id"],
+            "alpha": final_model_metadata["alpha"],
+            "model": final_model_metadata,
             "best_epoch": best_epoch,
             "history": history,
             "final_metrics": metrics_payload,
         }
+        write_json(
+            output_dir / "run_config.json",
+            {
+                **summary_stub,
+                "head_mode": final_model_metadata["head_mode"],
+                "model_architecture": final_model_metadata["model_architecture"],
+                "positive_label_id": final_model_metadata["positive_label_id"],
+                "alpha": final_model_metadata["alpha"],
+                "model": final_model_metadata,
+            },
+        )
         write_json(output_dir / "training_summary.json", training_summary)
 
         print(

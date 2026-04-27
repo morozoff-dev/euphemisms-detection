@@ -7,6 +7,10 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from src.data.text import TOKEN_RE, preprocess_text_for_annotation
 
 
@@ -51,6 +55,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-json",
         default=None,
         help="Optional path to save the full prediction payload as JSON.",
+    )
+    parser.add_argument(
+        "--head-mode",
+        choices=("auto", "baseline", "neighbor", "combined"),
+        default="auto",
+        help=(
+            "Checkpoint head mode. Use auto to read it from config.json; "
+            "legacy checkpoints resolve to baseline."
+        ),
     )
     parser.add_argument(
         "--device",
@@ -267,6 +280,7 @@ def predict_tags_for_tokens(
     device,
     max_length: int,
     window_overlap_words: int,
+    use_word_start_mask: bool,
 ) -> tuple[list[str], int]:
     if max_length <= 0:
         raise ValueError("max_length must be positive.")
@@ -303,12 +317,14 @@ def predict_tags_for_tokens(
                 )
 
             first_token_positions: list[tuple[int, int]] = []
+            word_start_mask = [0] * len(word_ids)
             previous_word_id: int | None = None
             for position, word_id in enumerate(word_ids):
                 if word_id is None:
                     continue
                 if word_id != previous_word_id:
                     first_token_positions.append((word_id, position))
+                    word_start_mask[position] = 1
                     previous_word_id = word_id
 
             if not first_token_positions:
@@ -320,6 +336,12 @@ def predict_tags_for_tokens(
                 key: value.to(device)
                 for key, value in encoding.items()
             }
+            if use_word_start_mask:
+                batch["word_start_mask"] = torch_module.tensor(
+                    [word_start_mask],
+                    dtype=torch_module.long,
+                    device=device,
+                )
             probabilities = model(**batch).logits[0].detach().cpu().softmax(dim=-1)
 
             for relative_word_index, position in first_token_positions:
@@ -363,7 +385,8 @@ def main() -> int:
 
     try:
         import torch
-        from transformers import AutoModelForTokenClassification, AutoTokenizer
+        from transformers import AutoTokenizer
+        from src.models import load_token_classifier_checkpoint
     except ModuleNotFoundError as exc:
         print(
             "Missing inference dependencies. Install PyTorch and transformers first, "
@@ -389,7 +412,10 @@ def main() -> int:
             raise RuntimeError(
                 "A fast tokenizer is required for token classification inference."
             )
-        model = AutoModelForTokenClassification.from_pretrained(checkpoint_dir)
+        model, checkpoint_metadata = load_token_classifier_checkpoint(
+            checkpoint_dir,
+            requested_head_mode=args.head_mode,
+        )
         device = resolve_device(args.device, torch)
         model.to(device)
 
@@ -401,6 +427,7 @@ def main() -> int:
             device=device,
             max_length=max_length,
             window_overlap_words=args.window_overlap_words,
+            use_word_start_mask=not checkpoint_metadata.is_legacy,
         )
         predicted_spans = build_predicted_spans(
             text=input_text,
@@ -413,6 +440,8 @@ def main() -> int:
             "run_dir": str(run_dir) if run_dir is not None else None,
             "input_path": str(Path(args.input_path)),
             "device": str(device),
+            "head_mode": checkpoint_metadata.head_mode,
+            "checkpoint_architecture": checkpoint_metadata.checkpoint_architecture,
             "max_length": max_length,
             "window_overlap_words": args.window_overlap_words,
             "chunk_count": chunk_count,
@@ -427,6 +456,8 @@ def main() -> int:
         print(f"Модель: {checkpoint_dir}")
         if run_dir is not None:
             print(f"Run directory: {run_dir}")
+        print(f"Head mode: {checkpoint_metadata.head_mode}")
+        print(f"Checkpoint architecture: {checkpoint_metadata.checkpoint_architecture}")
         print(f"Входной файл: {Path(args.input_path)}")
         print(f"Устройство: {device}")
         print(f"max_length: {max_length}")

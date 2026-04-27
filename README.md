@@ -28,9 +28,11 @@
    - текст разбивается на токены, которые сохраняют слова, маркеры, пунктуацию и числа до 3 цифр;
    - по char-level entity span'ам строятся два token-level тега: `O` и `EUPHEMISM`;
    - сохраняются `train.jsonl`, `val.jsonl`, `test.jsonl` и `manifest.json`.
-3. В `src.models.train` на готовом token-label датасете обучается baseline token-classification модель:
+3. В `src.models.train` на готовом token-label датасете обучается бинарная token-classification модель:
    - берётся `ModernBERT` / `RuModernBERT`;
    - token-level теги из `tokens` выравниваются на subword-токены;
+   - доступны три режима головы: `baseline`, `neighbor`, `combined`;
+   - все три режима обучаются как binary classifier с одним positive-logit и `BCEWithLogitsLoss`, но наружу возвращают logits формы `[batch, seq, 2]`, чтобы существующие `argmax`-метрики работали без отдельной ветки;
    - считается token-level и span-level F1;
    - для `test` дополнительно считаются отдельные masked-метрики по двум группам gold-сущностей:
      - `replacement_pool_only` — только synthetic replacements, пришедшие из test replacement pool;
@@ -45,7 +47,7 @@
 - `src/data/` — загрузка и очистка текста
 - `src/data_prep/` — подготовка data split'ов
 - `src/bio/` — token-label конвертация split JSON
-- `src/models/` — загрузка transformer-моделей, метрики и baseline training
+- `src/models/` — загрузка transformer-моделей, custom heads, метрики и training
 - `outputs/data_prep/` — подготовленные split JSON-файлы
 - `outputs/bio/` — token-label датасет
 - `outputs/models/` — чекпоинты, метрики и предсказания моделей
@@ -124,7 +126,7 @@ venv/bin/python
 
 Базовые зависимости перечислены в `requirements.txt`.
 
-Для обучения baseline модели нужен PyTorch. Если вы обучаете на GPU, лучше сначала поставить подходящую сборку `torch` по инструкции PyTorch для вашей CUDA-версии, а затем доустановить зависимости проекта:
+Для обучения модели нужен PyTorch. Если вы обучаете на GPU, лучше сначала поставить подходящую сборку `torch` по инструкции PyTorch для вашей CUDA-версии, а затем доустановить зависимости проекта:
 
 ```bash
 venv/bin/pip install -r requirements.txt
@@ -227,17 +229,46 @@ venv/bin/python -m src.bio \
 - `--test-path`
 - `--output-dir`
 
-### 3. Обучить baseline ModernBERT / RuModernBERT
+### 3. Обучить ModernBERT / RuModernBERT
 
-Основной запуск на русском baseline:
+Основной запуск на русском baseline head:
 
 ```bash
 venv/bin/python -m src.models.train \
   --model-name deepvk/RuModernBERT-base \
+  --head-mode baseline \
   --epochs 3 \
   --train-batch-size 8 \
   --eval-batch-size 16 \
   --max-length 256
+```
+
+Доступны три режима:
+
+- `baseline` — hidden state первого subword каждого word token -> dropout -> `Linear(hidden, 1)`;
+- `neighbor` — для word-start токена берутся contextualized states соседних word-start токенов; два соседа усредняются, один сосед берётся как есть, для single-word input используется zero-vector;
+- `combined` — `alpha * baseline_logit + (1 - alpha) * neighbor_logit`, где `alpha = sigmoid(raw_alpha)`, а `raw_alpha` стартует с `0.0`.
+
+Важно: `neighbor` не является строгим context-only head в смысле полностью независимого контекста. Он не использует hidden state текущего word-start токена напрямую, но соседние hidden states уже contextualized encoder states и могут содержать информацию о текущем токене через self-attention.
+
+Запуски experimental heads отличаются только `--head-mode`:
+
+```bash
+venv/bin/python -m src.models.train \
+  --model-name deepvk/RuModernBERT-base \
+  --head-mode neighbor
+```
+
+```bash
+venv/bin/python -m src.models.train \
+  --model-name deepvk/RuModernBERT-base \
+  --head-mode combined
+```
+
+Локальный smoke test custom heads без скачивания внешних весов:
+
+```bash
+venv/bin/python scripts/smoke_custom_heads.py
 ```
 
 При каждом запуске `src.models.train` автоматически создаётся новая папка вида `outputs/models/rumodernbert_base_04_22_15_37`, где суффикс — это `месяц_день_час_минута` времени старта train.
@@ -274,6 +305,7 @@ venv/bin/tensorboard --logdir outputs/models
 ```bash
 venv/bin/python -m src.models.train \
   --model-name deepvk/RuModernBERT-small \
+  --head-mode baseline \
   --epochs 1 \
   --train-batch-size 4 \
   --eval-batch-size 8 \
@@ -294,6 +326,7 @@ venv/bin/python -m src.models.train \
 venv/bin/python -m src.models.train \
   --model-name /path/to/local/model \
   --tokenizer-name /path/to/local/tokenizer \
+  --head-mode baseline \
   --output-dir outputs/models_local
 ```
 
@@ -301,6 +334,7 @@ venv/bin/python -m src.models.train \
 
 - `--model-name`
 - `--tokenizer-name`
+- `--head-mode`
 - `--model-revision`
 - `--tokenizer-revision`
 - `--cache-dir`
@@ -342,13 +376,14 @@ venv/bin/python -m src.models.train \
 
 - token-level precision / recall / F1 / accuracy;
 - span-level precision / recall / F1;
+- `head_mode`, `model_architecture`, `positive_label_id` и `alpha` для `combined`;
 - `best_checkpoint_selection` с политикой выбора `best_model` и score выбранного чекпоинта;
 - `val` и `test` метрики лучшего чекпоинта;
 - для `test` также сохраняется `subsets`:
   - `replacement_pool_only` — метрики только по gold-спанам типа `synthetic_replacement`, то есть по сущностям, пришедшим из того vocabulary pool, который был передан в `--test-euphemisms-paths`;
   - `other_gold_entities_only` — метрики по остальным gold-сущностям в `test` (`unchanged_target_keyword`, а для legacy split-файлов также fallback `other_gold_entity`).
 
-`run_config.json`, `training_summary.json`, `metrics.json` и `best_model_metrics.json` теперь также содержат `best_checkpoint_selection`; TensorBoard-директория добавляется дополнительно и не заменяет существующие метрики.
+`run_config.json`, `training_summary.json`, `metrics.json` и `best_model_metrics.json` теперь также содержат `head_mode`, `model_architecture`, `positive_label_id`, `alpha` для `combined` и `best_checkpoint_selection`; TensorBoard-директория добавляется дополнительно и не заменяет существующие метрики.
 
 В `analysis/test_fp_fn.md` сохраняется читаемый markdown-отчёт по `test`:
 
@@ -364,12 +399,15 @@ venv/bin/python -m src.models.train \
 ```bash
 venv/bin/python scripts/infer_one_text.py \
   --model-dir outputs/models/rumodernbert_base_04_24_11_04 \
+  --head-mode auto \
   --input-path path/to/text.txt
 ```
 
 Что поддерживается:
 
 - `--model-dir` можно передать либо как run-директорию `outputs/models/<run_name>`, либо сразу как `outputs/models/<run_name>/best_model`;
+- `--head-mode auto` читает режим из custom checkpoint, а legacy Hugging Face checkpoint считает `baseline`;
+- если явно передать `--head-mode baseline`, `neighbor` или `combined`, скрипт проверит metadata checkpoint'а и остановится с понятной ошибкой при mismatch;
 - `--input-path` — это обычный `txt`-файл с одним текстом; текст может занимать несколько строк;
 - скрипт читает файл целиком как один input text и прогоняет его через тот же preprocessing, что и dataset pipeline;
 - если текст длиннее training `max_length`, скрипт автоматически прогоняет его по перекрывающимся окнам и потом собирает итоговые token-label предсказания обратно;
@@ -380,13 +418,17 @@ venv/bin/python scripts/infer_one_text.py \
 ```bash
 venv/bin/python scripts/infer_one_text.py \
   --model-dir outputs/models/rumodernbert_base_04_24_11_04/best_model \
+  --head-mode baseline \
   --input-path path/to/text.txt \
   --output-json outputs/inference/result.json
 ```
 
+В JSON output дополнительно сохраняются фактические `head_mode` и `checkpoint_architecture`.
+
 Дополнительно поддерживаются параметры:
 
 - `--device`
+- `--head-mode`
 - `--max-length`
 - `--window-overlap-words`
 - `--print-tags`
@@ -399,17 +441,19 @@ venv/bin/python scripts/infer_one_text.py \
 - морфологически согласованная подстановка эвфемизмов;
 - подготовка data split dataset с positives и negatives;
 - преобразование split JSON в token-label датасет;
-- baseline training loop для `ModernBERT` / `RuModernBERT` в `src.models`;
+- training loop для `ModernBERT` / `RuModernBERT` в `src.models`;
+- custom binary heads: `baseline`, `neighbor`, `combined`;
+- `word_start_mask` для train/eval/inference;
+- checkpoint loading с custom/legacy compatibility checks;
 - token-level и span-level evaluation;
 - сохранение лучшего чекпоинта, predictions и metrics;
-- отдельный читаемый `val`-лог FP/FN для span-level error analysis;
+- отдельный читаемый `test`-лог FP/FN для span-level error analysis;
 - reproducible sampling и split по `seed` на этапе подготовки данных;
 - предупреждения в терминал, если char-level span нечётко совпадает с границами токенов;
-- `run_config.json` для воспроизводимого baseline training run.
+- `run_config.json` для воспроизводимого training run.
 
 ## Что пока не реализовано
 
-- experimental context-only head;
 - error analysis.
 
 ## Программное использование
