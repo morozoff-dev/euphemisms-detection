@@ -247,7 +247,7 @@ venv/bin/python -m src.models.train \
 
 - `baseline` — hidden state первого subword каждого word token -> dropout -> `Linear(hidden, 1)`;
 - `neighbor` — для word-start токена берутся contextualized states соседних word-start токенов; два соседа усредняются, один сосед берётся как есть, для single-word input используется zero-vector;
-- `combined` — `alpha * baseline_logit + (1 - alpha) * neighbor_logit`, где `alpha = sigmoid(raw_alpha)`, а `raw_alpha` стартует с `0.0`.
+- `combined` — `alpha * baseline_logit + (1 - alpha) * neighbor_logit`, где `alpha = sigmoid(raw_alpha)`, а стартовое значение `alpha` задаётся через `--initial-alpha` (`0.5` по умолчанию, что соответствует `raw_alpha = 0.0`).
 
 Для `combined` параметр `raw_alpha` остаётся обучаемым, но получает отдельный learning rate через `--alpha-learning-rate` (`1e-3` по умолчанию), без weight decay.
 
@@ -264,7 +264,9 @@ venv/bin/python -m src.models.train \
 ```bash
 venv/bin/python -m src.models.train \
   --model-name deepvk/RuModernBERT-base \
-  --head-mode combined
+  --head-mode combined \
+  --initial-alpha 0.5 \
+  --alpha-learning-rate 1e-2
 ```
 
 Локальный smoke test custom heads без скачивания внешних весов:
@@ -349,6 +351,7 @@ venv/bin/python -m src.models.train \
 - `--eval-batch-size`
 - `--learning-rate`
 - `--alpha-learning-rate`
+- `--initial-alpha`
 - `--weight-decay`
 - `--warmup-ratio`
 - `--grad-accumulation-steps`
@@ -358,6 +361,8 @@ venv/bin/python -m src.models.train \
 - `--max-train-samples`
 - `--max-val-samples`
 - `--max-test-samples`
+- `--best-checkpoint-metric`
+- `--best-checkpoint-tie-breaker-metric`
 
 После запуска `src.models.train` в автоматически созданную папку `outputs/models/<run_name>/` сохраняются:
 
@@ -376,6 +381,11 @@ venv/bin/python -m src.models.train \
 - primary metric: `test_span_f1`
 - tie-breaker: `test_token_f1`
 - `val`-метрики больше не участвуют в выборе `best_model`
+
+При необходимости можно менять только метрики выбора:
+
+- `--best-checkpoint-metric span_f1|token_f1`
+- `--best-checkpoint-tie-breaker-metric span_f1|token_f1`
 
 В `metrics.json` сохраняются:
 
@@ -396,6 +406,53 @@ venv/bin/python -m src.models.train \
 - для каждого sample показываются исходный `Text`, строки `Gold` и `Pred`;
 - entity span-ы подсвечиваются как `[[...]]`;
 - отдельно списком выписываются только `FP` и `FN` с token offsets.
+
+### 3.1. Sweep по `alpha` для `combined` head
+
+Для короткого перебора `alpha-learning-rate` и стартового `initial-alpha` теперь есть отдельный CLI:
+
+```bash
+venv/bin/python -m src.models.sweep_alpha \
+  --model-name deepvk/RuModernBERT-base \
+  --epochs 3 \
+  --train-batch-size 16 \
+  --eval-batch-size 16 \
+  --max-length 256 \
+  --device cuda:1 \
+  --alpha-learning-rates 1e-4 3e-4 1e-3 3e-3 1e-2 \
+  --initial-alphas 0.2 0.35 0.5 0.65 0.8
+```
+
+Что делает этот запуск:
+
+- для каждой пары `alpha-learning-rate` x `initial-alpha` запускает отдельное обучение `combined` head;
+- по умолчанию использует `3` эпохи на trial;
+- внутри каждого trial лучший чекпоинт выбирается по `test`;
+- после завершения строит общий рейтинг запусков по `test span_f1` с tie-breaker по `test token_f1`.
+
+Результаты sweep сохраняются в новую папку вида:
+
+```bash
+outputs/alpha_sweeps/<model>_alpha_sweep_<timestamp>/
+```
+
+Внутри сохраняются:
+
+- `manifest.json` — параметры sweep;
+- `summary.json` — полная сводка по всем trial;
+- `summary.md` — короткий markdown-рейтинг лучших запусков;
+- `logs/*.log` — stdout/stderr каждого training run;
+- `runs/` — вложенные training run-директории со всеми обычными артефактами `src.models.train`.
+
+Основные параметры `src.models.sweep_alpha`:
+
+- `--alpha-learning-rates`
+- `--initial-alphas`
+- `--selection-metric`
+- `--selection-tie-breaker-metric`
+- `--top-k`
+- `--fail-fast`
+- `--dry-run`
 
 ### 4. Инференс на одном тексте из `txt`
 

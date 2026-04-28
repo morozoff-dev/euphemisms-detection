@@ -99,6 +99,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--initial-alpha",
+        type=float,
+        default=0.5,
+        help=(
+            "Initial sigmoid(alpha) value for the combined head. "
+            "Must be strictly between 0 and 1. Ignored for baseline and neighbor heads."
+        ),
+    )
+    parser.add_argument(
         "--weight-decay",
         type=float,
         default=0.01,
@@ -169,6 +178,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional limit for a reproducible test subset.",
     )
+    parser.add_argument(
+        "--best-checkpoint-metric",
+        choices=("span_f1", "token_f1"),
+        default="span_f1",
+        help="Primary metric for best-checkpoint selection.",
+    )
+    parser.add_argument(
+        "--best-checkpoint-tie-breaker-metric",
+        choices=("span_f1", "token_f1"),
+        default="token_f1",
+        help="Tie-breaker metric for best-checkpoint selection.",
+    )
     return parser
 
 
@@ -203,6 +224,7 @@ def main() -> int:
         eval_batch_size=args.eval_batch_size,
         learning_rate=args.learning_rate,
         alpha_learning_rate=args.alpha_learning_rate,
+        initial_alpha=args.initial_alpha,
         weight_decay=args.weight_decay,
         warmup_ratio=args.warmup_ratio,
         grad_accumulation_steps=args.grad_accumulation_steps,
@@ -215,6 +237,8 @@ def main() -> int:
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
         max_test_samples=args.max_test_samples,
+        best_checkpoint_metric=args.best_checkpoint_metric,
+        best_checkpoint_tie_breaker_metric=args.best_checkpoint_tie_breaker_metric,
     )
 
     try:

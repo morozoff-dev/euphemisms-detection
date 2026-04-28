@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from transformers import AutoModelForTokenClassification, AutoTokenizer
@@ -40,6 +41,20 @@ def _build_pretrained_kwargs(
     return kwargs
 
 
+def _validate_initial_alpha(initial_alpha: float) -> float:
+    alpha = float(initial_alpha)
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(
+            "--initial-alpha must be strictly between 0 and 1 for combined head mode."
+        )
+    return alpha
+
+
+def _alpha_probability_to_raw_logit(initial_alpha: float) -> float:
+    alpha = _validate_initial_alpha(initial_alpha)
+    return math.log(alpha / (1.0 - alpha))
+
+
 def build_tokenizer(
     *,
     model_name_or_path: str,
@@ -76,6 +91,7 @@ def build_token_classifier(
     label2id: dict[str, int],
     head_mode: str = "baseline",
     positive_label_id: int = 1,
+    initial_alpha: float = 0.5,
     model_revision: str | None = None,
     cache_dir: str | None = None,
 ):
@@ -83,12 +99,17 @@ def build_token_classifier(
         raise ValueError(
             "The euphemism token classifier is binary and expects exactly 2 labels."
         )
+    raw_alpha_init = 0.0
+    if head_mode == "combined":
+        raw_alpha_init = _alpha_probability_to_raw_logit(initial_alpha)
+
     return EuphemismTokenClassifier.from_encoder_pretrained(
         model_name_or_path,
         id2label=id2label,
         label2id=label2id,
         head_mode=head_mode,
         positive_label_id=positive_label_id,
+        raw_alpha_init=raw_alpha_init,
         model_revision=model_revision,
         cache_dir=cache_dir,
         pretrained_kwargs=_build_pretrained_kwargs(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,7 @@ class EuphemismTokenClassifierConfig(PretrainedConfig):
         id2label: dict[int, str],
         label2id: dict[str, int],
         positive_label_id: int,
+        raw_alpha_init: float = 0.0,
     ) -> "EuphemismTokenClassifierConfig":
         return cls(
             encoder_config=encoder_config.to_dict(),
@@ -138,8 +140,12 @@ class EuphemismTokenClassifierConfig(PretrainedConfig):
             model_architecture=MODEL_ARCHITECTURE,
             positive_label_id=positive_label_id,
             classifier_dropout=_dropout_from_encoder_config(encoder_config),
-            raw_alpha_init=0.0,
-            alpha=0.5 if head_mode == "combined" else None,
+            raw_alpha_init=raw_alpha_init,
+            alpha=(
+                1.0 / (1.0 + math.exp(-float(raw_alpha_init)))
+                if head_mode == "combined"
+                else None
+            ),
             num_labels=len(id2label),
             id2label=id2label,
             label2id=label2id,
@@ -205,6 +211,7 @@ class EuphemismTokenClassifier(PreTrainedModel):
         id2label: dict[int, str],
         label2id: dict[str, int],
         positive_label_id: int,
+        raw_alpha_init: float = 0.0,
         model_revision: str | None = None,
         cache_dir: str | None = None,
         pretrained_kwargs: dict[str, Any] | None = None,
@@ -221,6 +228,7 @@ class EuphemismTokenClassifier(PreTrainedModel):
             id2label=id2label,
             label2id=label2id,
             positive_label_id=positive_label_id,
+            raw_alpha_init=raw_alpha_init,
         )
         model = cls(model_config)
         encoder_kwargs = dict(kwargs)

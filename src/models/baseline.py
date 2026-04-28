@@ -60,6 +60,7 @@ class BaselineTrainingConfig:
     eval_batch_size: int = 16
     learning_rate: float = 3e-5
     alpha_learning_rate: float = 1e-3
+    initial_alpha: float = 0.5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
     grad_accumulation_steps: int = 1
@@ -72,6 +73,8 @@ class BaselineTrainingConfig:
     max_train_samples: int | None = None
     max_val_samples: int | None = None
     max_test_samples: int | None = None
+    best_checkpoint_metric: str = "span_f1"
+    best_checkpoint_tie_breaker_metric: str = "token_f1"
 
 
 @dataclass(frozen=True)
@@ -112,8 +115,7 @@ class EvaluationResult:
 
 
 BEST_CHECKPOINT_SPLIT = "test"
-BEST_CHECKPOINT_PRIMARY_METRIC = "span_f1"
-BEST_CHECKPOINT_TIE_BREAKER_METRIC = "token_f1"
+BEST_CHECKPOINT_METRICS = ("span_f1", "token_f1")
 
 
 def set_seed(seed: int) -> None:
@@ -438,10 +440,15 @@ def prefix_metrics(
     }
 
 
-def build_best_checkpoint_score(metrics: dict[str, float | int]) -> tuple[float, float]:
+def build_best_checkpoint_score(
+    metrics: dict[str, float | int],
+    *,
+    primary_metric: str,
+    tie_breaker_metric: str,
+) -> tuple[float, float]:
     return (
-        float(metrics[BEST_CHECKPOINT_PRIMARY_METRIC]),
-        float(metrics[BEST_CHECKPOINT_TIE_BREAKER_METRIC]),
+        float(metrics[primary_metric]),
+        float(metrics[tie_breaker_metric]),
     )
 
 
@@ -774,6 +781,24 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         raise ValueError("Overflow handling must be either 'drop' or 'truncate'.")
     if config.head_mode not in HEAD_MODES:
         raise ValueError("Head mode must be one of: baseline, neighbor, combined.")
+    if config.best_checkpoint_metric not in BEST_CHECKPOINT_METRICS:
+        raise ValueError(
+            "Best checkpoint metric must be one of: "
+            f"{', '.join(BEST_CHECKPOINT_METRICS)}."
+        )
+    if config.best_checkpoint_tie_breaker_metric not in BEST_CHECKPOINT_METRICS:
+        raise ValueError(
+            "Best checkpoint tie-breaker metric must be one of: "
+            f"{', '.join(BEST_CHECKPOINT_METRICS)}."
+        )
+    if config.best_checkpoint_metric == config.best_checkpoint_tie_breaker_metric:
+        raise ValueError(
+            "Best checkpoint primary metric and tie-breaker metric must differ."
+        )
+    if config.head_mode == "combined" and not 0.0 < config.initial_alpha < 1.0:
+        raise ValueError(
+            "Initial alpha must be strictly between 0 and 1 for combined head mode."
+        )
 
     set_seed(config.seed)
     device = resolve_device(config.device)
@@ -809,6 +834,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             label2id=label_to_id,
             head_mode=config.head_mode,
             positive_label_id=positive_label_id,
+            initial_alpha=config.initial_alpha,
             model_revision=config.model_revision,
             cache_dir=config.cache_dir,
         )
@@ -918,8 +944,8 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         "model": initial_model_metadata,
         "best_checkpoint_selection": {
             "split": BEST_CHECKPOINT_SPLIT,
-            "primary_metric": BEST_CHECKPOINT_PRIMARY_METRIC,
-            "tie_breaker_metric": BEST_CHECKPOINT_TIE_BREAKER_METRIC,
+            "primary_metric": config.best_checkpoint_metric,
+            "tie_breaker_metric": config.best_checkpoint_tie_breaker_metric,
         },
         "resolved_runtime": {
             "device": str(device),
@@ -950,7 +976,13 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
     print(f"Training device: {device}")
     print(f"Head mode: {config.head_mode}")
     if config.head_mode == "combined":
+        print(f"Initial alpha: {config.initial_alpha}")
         print(f"Alpha learning rate: {config.alpha_learning_rate}")
+    print(
+        "Best checkpoint selection: "
+        f"{BEST_CHECKPOINT_SPLIT}/{config.best_checkpoint_metric} "
+        f"(tie-breaker: {config.best_checkpoint_tie_breaker_metric})"
+    )
     print(
         "Model parameters: "
         f"total={parameter_counts['total']}, trainable={parameter_counts['trainable']}"
@@ -975,6 +1007,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                 "learning_rate": config.learning_rate,
                 "weight_decay": config.weight_decay,
                 "alpha_learning_rate": config.alpha_learning_rate,
+                "initial_alpha": config.initial_alpha,
                 "warmup_ratio": config.warmup_ratio,
                 "grad_accumulation_steps": config.grad_accumulation_steps,
                 "max_grad_norm": config.max_grad_norm,
@@ -1112,7 +1145,12 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                     f"{format_subset_metric_summary(test_result.subset_metrics)}"
                 )
 
-            score = build_best_checkpoint_score(test_result.metrics)
+            checkpoint_result = test_result
+            score = build_best_checkpoint_score(
+                checkpoint_result.metrics,
+                primary_metric=config.best_checkpoint_metric,
+                tie_breaker_metric=config.best_checkpoint_tie_breaker_metric,
+            )
             if best_score is None or score > best_score:
                 best_score = score
                 best_epoch = epoch_index
@@ -1130,11 +1168,17 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                         "model": best_model_metadata,
                         "best_checkpoint_selection": {
                             "split": BEST_CHECKPOINT_SPLIT,
-                            "primary_metric": BEST_CHECKPOINT_PRIMARY_METRIC,
-                            "tie_breaker_metric": BEST_CHECKPOINT_TIE_BREAKER_METRIC,
+                            "primary_metric": config.best_checkpoint_metric,
+                            "tie_breaker_metric": config.best_checkpoint_tie_breaker_metric,
                             "score": {
-                                "test_span_f1": test_result.metrics["span_f1"],
-                                "test_token_f1": test_result.metrics["token_f1"],
+                                f"{BEST_CHECKPOINT_SPLIT}_{config.best_checkpoint_metric}": (
+                                    checkpoint_result.metrics[config.best_checkpoint_metric]
+                                ),
+                                f"{BEST_CHECKPOINT_SPLIT}_{config.best_checkpoint_tie_breaker_metric}": (
+                                    checkpoint_result.metrics[
+                                        config.best_checkpoint_tie_breaker_metric
+                                    ]
+                                ),
                             },
                         },
                         "val_loss": val_result.loss,
@@ -1146,8 +1190,10 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                 )
                 print(
                     f"Saved new best checkpoint to {best_model_dir} | "
-                    f"test_span_f1={test_result.metrics['span_f1']:.4f} | "
-                    f"test_token_f1={test_result.metrics['token_f1']:.4f}"
+                    f"{BEST_CHECKPOINT_SPLIT}_{config.best_checkpoint_metric}="
+                    f"{float(checkpoint_result.metrics[config.best_checkpoint_metric]):.4f} | "
+                    f"{BEST_CHECKPOINT_SPLIT}_{config.best_checkpoint_tie_breaker_metric}="
+                    f"{float(checkpoint_result.metrics[config.best_checkpoint_tie_breaker_metric]):.4f}"
                 )
 
         if best_epoch is None:
@@ -1200,11 +1246,15 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             "model": final_model_metadata,
             "best_checkpoint_selection": {
                 "split": BEST_CHECKPOINT_SPLIT,
-                "primary_metric": BEST_CHECKPOINT_PRIMARY_METRIC,
-                "tie_breaker_metric": BEST_CHECKPOINT_TIE_BREAKER_METRIC,
+                "primary_metric": config.best_checkpoint_metric,
+                "tie_breaker_metric": config.best_checkpoint_tie_breaker_metric,
                 "score": {
-                    "test_span_f1": final_test_result.metrics["span_f1"],
-                    "test_token_f1": final_test_result.metrics["token_f1"],
+                    f"{BEST_CHECKPOINT_SPLIT}_{config.best_checkpoint_metric}": (
+                        final_test_result.metrics[config.best_checkpoint_metric]
+                    ),
+                    f"{BEST_CHECKPOINT_SPLIT}_{config.best_checkpoint_tie_breaker_metric}": (
+                        final_test_result.metrics[config.best_checkpoint_tie_breaker_metric]
+                    ),
                 },
             },
             "val": {
@@ -1274,7 +1324,7 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
         write_json(output_dir / "training_summary.json", training_summary)
 
         print(
-            f"Best epoch (selected by test): {best_epoch} | "
+            f"Best epoch (selected by {BEST_CHECKPOINT_SPLIT}): {best_epoch} | "
             f"val_span_f1={final_val_result.metrics['span_f1']:.4f} | "
             f"test_span_f1={final_test_result.metrics['span_f1']:.4f}"
         )
