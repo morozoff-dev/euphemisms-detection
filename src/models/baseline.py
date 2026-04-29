@@ -36,7 +36,9 @@ from src.bio.converter import (
     BioSample,
 )
 from src.models.metrics import (
+    build_negative_group_fp_markdown_report,
     build_fp_fn_markdown_report,
+    compute_negative_group_fp_metrics,
     compute_subset_sequence_labeling_metrics,
     compute_sequence_labeling_metrics,
     has_annotation_kind_metadata,
@@ -82,6 +84,7 @@ class EncodedSampleMetadata:
     sample_id: str
     source: str
     source_index: int
+    negative_group: str | None
     text: str
     tokens: list[str]
     gold_tags: list[str]
@@ -260,6 +263,7 @@ class PreparedTokenClassificationDataset(Dataset):
                 sample_id=sample.sample_id,
                 source=sample.source,
                 source_index=sample.source_index,
+                negative_group=sample.negative_group,
                 text=sample.text,
                 tokens=kept_tokens,
                 gold_tags=kept_gold_tags,
@@ -542,6 +546,10 @@ def build_short_model_name(model_name_or_path: str) -> str:
     return sanitized_name or "model"
 
 
+def build_safe_filename_fragment(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z]+", "_", value).strip("_").lower() or "group"
+
+
 def build_run_output_dir(
     base_output_dir: str | Path,
     *,
@@ -625,6 +633,7 @@ def evaluate_model(
                             "sample_id": sample_metadata.sample_id,
                             "source": sample_metadata.source,
                             "source_index": sample_metadata.source_index,
+                            "negative_group": sample_metadata.negative_group,
                             "text": sample_metadata.text,
                             "tokens": sample_metadata.tokens,
                             "gold_tags": gold_tags,
@@ -1223,6 +1232,12 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
             collect_predictions=True,
             compute_entity_subset_metrics=True,
         )
+        final_val_negative_group_metrics = compute_negative_group_fp_metrics(
+            final_val_result.predictions
+        )
+        final_test_negative_group_metrics = compute_negative_group_fp_metrics(
+            final_test_result.predictions
+        )
 
         predictions_dir = output_dir / "predictions"
         write_jsonl(predictions_dir / "val.jsonl", final_val_result.predictions)
@@ -1236,6 +1251,33 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                 split_name="test",
             ),
         )
+        for group_name in final_test_negative_group_metrics:
+            report_filename = (
+                f"test_{build_safe_filename_fragment(group_name)}_fp.md"
+            )
+            write_text(
+                analysis_dir / report_filename,
+                build_negative_group_fp_markdown_report(
+                    final_test_result.predictions,
+                    group_name=group_name,
+                    split_name="test",
+                ),
+            )
+
+        val_metrics_payload = {
+            "loss": final_val_result.loss,
+            **final_val_result.metrics,
+        }
+        if final_val_negative_group_metrics:
+            val_metrics_payload["negative_groups"] = final_val_negative_group_metrics
+
+        test_metrics_payload = {
+            "loss": final_test_result.loss,
+            **final_test_result.metrics,
+            "subsets": final_test_result.subset_metrics,
+        }
+        if final_test_negative_group_metrics:
+            test_metrics_payload["negative_groups"] = final_test_negative_group_metrics
 
         metrics_payload = {
             "best_epoch": best_epoch,
@@ -1257,35 +1299,21 @@ def train_baseline_model(config: BaselineTrainingConfig) -> dict:
                     ),
                 },
             },
-            "val": {
-                "loss": final_val_result.loss,
-                **final_val_result.metrics,
-            },
-            "test": {
-                "loss": final_test_result.loss,
-                **final_test_result.metrics,
-                "subsets": final_test_result.subset_metrics,
-            },
+            "val": val_metrics_payload,
+            "test": test_metrics_payload,
         }
         write_json(output_dir / "metrics.json", metrics_payload)
 
         log_scalar_tree(
             writer,
             prefix="final/val",
-            values={
-                "loss": final_val_result.loss,
-                **final_val_result.metrics,
-            },
+            values=val_metrics_payload,
             step=best_epoch,
         )
         log_scalar_tree(
             writer,
             prefix="final/test",
-            values={
-                "loss": final_test_result.loss,
-                **final_test_result.metrics,
-                "subsets": final_test_result.subset_metrics,
-            },
+            values=test_metrics_payload,
             step=best_epoch,
         )
         writer.add_scalar("final/best_epoch", float(best_epoch), best_epoch)

@@ -128,6 +128,7 @@ def build_fp_fn_record(
     was_truncated: bool,
     original_token_count: int,
     kept_token_count: int,
+    negative_group: str | None = None,
 ) -> dict:
     if len(tokens) != len(gold_tags) or len(tokens) != len(predicted_tags):
         raise ValueError("Tokens, gold tags, and predicted tags must be aligned.")
@@ -141,6 +142,7 @@ def build_fp_fn_record(
         "sample_id": sample_id,
         "source": source,
         "source_index": source_index,
+        "negative_group": negative_group,
         "text": text,
         "tokens": list(tokens),
         "gold_tags": list(gold_tags),
@@ -168,6 +170,7 @@ def build_fp_fn_rows(
             sample_id=prediction["sample_id"],
             source=prediction["source"],
             source_index=prediction["source_index"],
+            negative_group=prediction.get("negative_group"),
             text=prediction["text"],
             tokens=prediction["tokens"],
             gold_tags=prediction["gold_tags"],
@@ -227,12 +230,16 @@ def build_fp_fn_markdown_report(
         return "\n".join(lines)
 
     for index, row in enumerate(rows, start=1):
-        lines.extend(
+        header_lines = [
+            f"## {index}. {row['sample_id']}",
+            "",
+            f"- source: {row['source']}",
+            f"- source_index: {row['source_index']}",
+        ]
+        if row["negative_group"] is not None:
+            header_lines.append(f"- negative_group: {row['negative_group']}")
+        header_lines.extend(
             [
-                f"## {index}. {row['sample_id']}",
-                "",
-                f"- source: {row['source']}",
-                f"- source_index: {row['source_index']}",
                 f"- counts: FP={row['counts']['fp']} FN={row['counts']['fn']}",
                 (
                     f"- truncated: yes "
@@ -251,6 +258,7 @@ def build_fp_fn_markdown_report(
                 render_tokens_with_highlights(row["tokens"], row["predicted_tags"]),
             ]
         )
+        lines.extend(header_lines)
 
         lines.append("")
         lines.append("FP:")
@@ -266,6 +274,140 @@ def build_fp_fn_markdown_report(
         else:
             lines.append("- none")
 
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def count_token_false_positives(
+    gold_tags: Sequence[str],
+    predicted_tags: Sequence[str],
+) -> int:
+    if len(gold_tags) != len(predicted_tags):
+        raise ValueError("Gold and predicted token sequences must be aligned.")
+    return sum(
+        1
+        for gold_tag, predicted_tag in zip(gold_tags, predicted_tags)
+        if predicted_tag != "O" and predicted_tag != gold_tag
+    )
+
+
+def compute_negative_group_fp_metrics(
+    predictions: Sequence[dict],
+) -> dict[str, dict[str, int]]:
+    group_metrics: dict[str, dict[str, int]] = {}
+
+    for prediction in predictions:
+        negative_group = prediction.get("negative_group")
+        if prediction.get("source") != "negative" or negative_group is None:
+            continue
+
+        tokens = prediction["tokens"]
+        gold_tags = prediction["gold_tags"]
+        predicted_tags = prediction["predicted_tags"]
+        if len(tokens) != len(gold_tags) or len(tokens) != len(predicted_tags):
+            raise ValueError("Tokens, gold tags, and predicted tags must be aligned.")
+
+        gold_spans = token_labels_to_spans(gold_tags)
+        predicted_spans = token_labels_to_spans(predicted_tags)
+        token_fp = count_token_false_positives(gold_tags, predicted_tags)
+        span_fp = len(predicted_spans - gold_spans)
+
+        metrics = group_metrics.setdefault(
+            negative_group,
+            {
+                "samples": 0,
+                "total_tokens": 0,
+                "token_fp": 0,
+                "span_fp": 0,
+                "predicted_spans": 0,
+                "samples_with_token_fp": 0,
+                "samples_with_span_fp": 0,
+            },
+        )
+        metrics["samples"] += 1
+        metrics["total_tokens"] += len(tokens)
+        metrics["token_fp"] += token_fp
+        metrics["span_fp"] += span_fp
+        metrics["predicted_spans"] += len(predicted_spans)
+        if token_fp > 0:
+            metrics["samples_with_token_fp"] += 1
+        if span_fp > 0:
+            metrics["samples_with_span_fp"] += 1
+
+    return group_metrics
+
+
+def build_negative_group_fp_markdown_report(
+    predictions: Sequence[dict],
+    *,
+    group_name: str,
+    split_name: str = "test",
+) -> str:
+    group_predictions = [
+        prediction
+        for prediction in predictions
+        if prediction.get("source") == "negative"
+        and prediction.get("negative_group") == group_name
+    ]
+    rows = [
+        row
+        for row in build_fp_fn_rows(group_predictions, include_empty=False)
+        if row["counts"]["fp"] > 0
+    ]
+    rows.sort(
+        key=lambda row: (
+            row["counts"]["fp"],
+            row["sample_id"],
+        ),
+        reverse=True,
+    )
+
+    total_fp = sum(row["counts"]["fp"] for row in rows)
+    lines = [
+        f"# {split_name.upper()} Negative Group FP Report",
+        "",
+        f"- negative_group: {group_name}",
+        f"- group_samples: {len(group_predictions)}",
+        f"- samples_with_fp: {len(rows)}",
+        f"- total_fp: {total_fp}",
+        "",
+        "Обозначения:",
+        "- `[[...]]` в строке `Pred` показывает FP-спаны модели.",
+        "",
+    ]
+
+    if not rows:
+        lines.append("FP на этой группе не найдено.")
+        lines.append("")
+        return "\n".join(lines)
+
+    for index, row in enumerate(rows, start=1):
+        lines.extend(
+            [
+                f"## {index}. {row['sample_id']}",
+                "",
+                f"- source_index: {row['source_index']}",
+                f"- counts: FP={row['counts']['fp']}",
+                (
+                    f"- truncated: yes "
+                    f"(kept {row['kept_token_count']} of {row['original_token_count']} tokens)"
+                    if row["was_truncated"]
+                    else f"- truncated: no ({row['kept_token_count']} tokens)"
+                ),
+                "",
+                "Text:",
+                row["text"],
+                "",
+                "Pred:",
+                render_tokens_with_highlights(row["tokens"], row["predicted_tags"]),
+                "",
+                "FP:",
+            ]
+        )
+        lines.extend(format_span_for_humans(span) for span in row["fp"])
         lines.append("")
         lines.append("---")
         lines.append("")

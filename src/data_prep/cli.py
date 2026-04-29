@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 
 from src.data_prep.builder import (
+    DEFAULT_EXTRA_NEGATIVE_GROUP_NAME,
+    DEFAULT_EXTRA_NEGATIVE_TEST_PATH,
+    DEFAULT_EXTRA_NEGATIVE_TRAIN_VAL_PATH,
     DEFAULT_NEGATIVE_LIMIT,
     DEFAULT_NEGATIVES_PATH,
     DEFAULT_POSITIVE_LIMIT,
@@ -27,6 +30,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--negatives-path",
         default=DEFAULT_NEGATIVES_PATH,
         help="Path to negative texts, one text per line.",
+    )
+    parser.add_argument(
+        "--extra-negative-train-val-path",
+        default=DEFAULT_EXTRA_NEGATIVE_TRAIN_VAL_PATH,
+        help=(
+            "Path to extra negative texts that are split only between train and val. "
+            "Each line is treated as a gold-negative sample."
+        ),
+    )
+    parser.add_argument(
+        "--extra-negative-test-path",
+        default=DEFAULT_EXTRA_NEGATIVE_TEST_PATH,
+        help=(
+            "Path to extra negative texts that are added only to test. "
+            "Each line is treated as a gold-negative sample."
+        ),
+    )
+    parser.add_argument(
+        "--extra-negative-group-name",
+        default=DEFAULT_EXTRA_NEGATIVE_GROUP_NAME,
+        help="Group name stored in negative_group for extra negative samples.",
+    )
+    parser.add_argument(
+        "--disable-extra-negative-group",
+        action="store_true",
+        help="Disable default extra negative group injection and use only --negatives-path.",
     )
     parser.add_argument(
         "--target-words-path",
@@ -107,6 +136,10 @@ def main() -> int:
     manifest = build_dataset_splits(
         texts_path=args.texts_path,
         negatives_path=args.negatives_path,
+        extra_negative_train_val_path=args.extra_negative_train_val_path,
+        extra_negative_test_path=args.extra_negative_test_path,
+        extra_negative_group_name=args.extra_negative_group_name,
+        enable_extra_negative_group=not args.disable_extra_negative_group,
         train_euphemisms_paths=args.train_euphemisms_paths,
         val_euphemisms_paths=args.val_euphemisms_paths,
         test_euphemisms_paths=args.test_euphemisms_paths,
@@ -131,18 +164,30 @@ def main() -> int:
         f"(lowercased={preprocessing['negative_texts']['lowercased_mostly_uppercase']}, "
         f"empty={preprocessing['negative_texts']['dropped_empty_after_normalization']})"
     )
+    extra_group = manifest["extra_negative_group"]
+    if extra_group["enabled"]:
+        print(
+            "Extra negative group: "
+            f"{extra_group['group_name']} | "
+            f"train_val_kept={preprocessing['extra_negative_train_val_texts']['kept_russian']}, "
+            f"test_kept={preprocessing['extra_negative_test_texts']['kept_russian']}"
+        )
     counts = manifest["counts"]
     print(
         "After sampling: "
         f"{counts['after_sampling']['positive']} positive, "
-        f"{counts['after_sampling']['negative']} negative"
+        f"{counts['after_sampling']['negative']} negative, "
+        f"{counts['after_sampling']['extra_negative_train_val']} extra train_val negative, "
+        f"{counts['after_sampling']['extra_negative_test']} extra test negative"
     )
     for split_name in ("train", "val", "test"):
         split_info = manifest["splits"][split_name]
         print(
             f"{split_name}: total={split_info['total']}, "
             f"positive={split_info['positive_samples']}, "
-            f"negative={split_info['negative_samples']}"
+            f"negative={split_info['negative_samples']}, "
+            f"base_negative={split_info['base_negative_samples']}, "
+            f"extra_negative={split_info['extra_negative_group_samples']}"
         )
     return 0
 

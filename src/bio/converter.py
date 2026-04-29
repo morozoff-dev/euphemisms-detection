@@ -44,6 +44,7 @@ class SourceSample:
     source_index: int
     text: str
     entities: list[EntitySpan]
+    negative_group: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ class BioSample:
     tokens: list[str]
     bio_tags: list[str]
     entities: list[EntitySpan]
+    negative_group: str | None = None
     token_annotation_kinds: list[str | None] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -124,6 +126,7 @@ class BioDataset(Sequence[BioSample]):
                         text=payload["text"],
                         tokens=payload["tokens"],
                         bio_tags=payload["bio_tags"],
+                        negative_group=payload.get("negative_group"),
                         entities=[
                             EntitySpan(
                                 start=entity["start"],
@@ -242,6 +245,7 @@ def load_split_samples(
                 source_index=item.get("source_index", index),
                 text=text,
                 entities=sorted(entities, key=lambda entity: (entity.start, entity.end)),
+                negative_group=item.get("negative_group"),
             )
         )
     return samples
@@ -362,6 +366,7 @@ def prepare_sample(
         tokens=[token.text for token in tokens],
         bio_tags=bio_tags,
         entities=sample.entities,
+        negative_group=sample.negative_group,
         token_annotation_kinds=token_annotation_kinds,
     )
 
@@ -373,6 +378,15 @@ def write_jsonl(path: str | Path, rows: Iterable[dict]) -> None:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False))
             handle.write("\n")
+
+
+def count_negative_groups(rows: Sequence[SourceSample | BioSample]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        if row.negative_group is None:
+            continue
+        counts[row.negative_group] = counts.get(row.negative_group, 0) + 1
+    return counts
 
 
 def build_manifest(
@@ -398,6 +412,7 @@ def build_manifest(
                     "total": len(rows),
                     "positive": sum(row.source == "positive" for row in rows),
                     "negative": sum(row.source == "negative" for row in rows),
+                    "negative_groups": count_negative_groups(rows),
                 }
                 for split_name, rows in input_rows.items()
             },
@@ -406,6 +421,7 @@ def build_manifest(
                     "total": len(rows),
                     "positive": sum(row.source == "positive" for row in rows),
                     "negative": sum(row.source == "negative" for row in rows),
+                    "negative_groups": count_negative_groups(rows),
                     "entity_tokens": sum(
                         tag != "O" for row in rows for tag in row.bio_tags
                     ),

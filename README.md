@@ -13,15 +13,17 @@
 1. В `src.data_prep` из сырых positive и negative текстов строятся уже готовые split-файлы для датасета:
    - positive texts берутся из `data/drug_texts_small.txt`;
    - negative texts берутся из `data/negatives.txt`;
+   - отдельные extra negatives с эвфемизмами по умолчанию берутся из `data/train_val_negatives_with_euphemisms.txt` для `train/val` и `data/test_negatives_with_euphemisms.txt` для `test`;
    - перед language filter тексты проходят annotation-oriented preprocessing: `NFKC`, удаление zero-width/HTML/entity/emoji, замена `URL` / `email` / `@mention` / телефонов / длинных чисел на маркеры;
    - на раннем preprocessing этапе сохраняются только тексты, для которых `cld2` определяет основной язык как русский (`ru`);
    - если в тексте более 50% букв находятся в верхнем регистре, такой текст полностью переводится в нижний регистр;
    - пунктуация сохраняется, а числовые токены длиной до 3 цифр остаются в тексте как есть;
    - positive texts с упоминаниями target keywords сэмплируются, как и negatives;
    - positives и negatives независимо режутся на `train/val/test` с сохранением заданного соотношения;
+   - extra `train_val` negatives режутся только между `train` и `val`, extra `test` negatives целиком добавляются только в `test`;
    - target keywords заменяются частично: по умолчанию заменяется 50% найденных mentions, остальные остаются в тексте и тоже размечаются как сущности;
-   - в `train/val` positives используют `generated_slang_euphemisms.txt` как replacement pool;
-   - в `test` positives используют `generated_euphemisms.txt` как replacement pool;
+   - в `train/val` positives используют `train_val_euphemisms.txt` как replacement pool;
+   - в `test` positives используют `test_euphemisms.txt` как replacement pool;
    - сохраняются `train.json`, `val.json`, `test.json` и `manifest.json`.
 2. В `src.bio` готовые split JSON-файлы переводятся в бинарный token-label датасет:
    - входные `train.json`, `val.json`, `test.json` уже не пересэмпливаются и не режутся заново;
@@ -37,6 +39,7 @@
    - для `test` дополнительно считаются отдельные masked-метрики по двум группам gold-сущностей:
      - `replacement_pool_only` — только synthetic replacements, пришедшие из test replacement pool;
      - `other_gold_entities_only` — остальные gold-сущности, то есть прежде всего незаменённые `target_keyword`;
+   - для extra negative groups отдельно считаются FP-oriented counts без изменения общих token/span метрик;
    - после каждой эпохи в логах считаются метрики и на `val`, и на `test`;
    - сохраняются лучший чекпоинт, метрики, предсказания на `val/test` и отдельный человеко-читаемый `test`-лог FP/FN;
    - для каждого запуска автоматически создаётся отдельная run-папка в `outputs/models/`.
@@ -70,6 +73,7 @@
 - `source_index`
 - `text` — итоговый текст, который потом пойдёт в token-label конвертацию
 - `entities` — список entity span-ов
+- `negative_group` — есть только у extra negative samples, например `negative_euphemism_match`
 
 Для positive samples дополнительно сохраняются:
 
@@ -85,6 +89,7 @@
 - какие правила раннего preprocessing применялись (`cld2` language filter, lowercasing mostly-uppercase текстов и marker-based text normalization);
 - какие euphemism vocab files использовались для `train/val/test`;
 - сколько positive/negative текстов осталось после preprocessing;
+- сколько extra negative текстов осталось после preprocessing;
 - какая доля target keyword mentions заменялась;
 - сколько positive/negative примеров было до и после sampling;
 - как распределились данные по `train/val/test`.
@@ -106,6 +111,7 @@
 - `tokens` — предтокенизированные единицы для NER: слова, маркеры, пунктуация и числа до 3 цифр
 - `bio_tags` — token-level разметка для токенов; поле сохранило старое имя для совместимости, но теперь содержит только `O` или `EUPHEMISM`
 - `entities` — entity spans в char-level формате
+- `negative_group` — optional group marker для extra negative samples
 - `token_annotation_kinds` — список той же длины, что и `tokens`; для entity-токенов хранит `annotation_kind` (`synthetic_replacement`, `unchanged_target_keyword`), а для legacy split-файлов без явного `annotation_kind` может использовать fallback `other_gold_entity`; для остальных токенов хранит `null`
 
 `manifest.json` для token-label конвертации хранит:
@@ -150,14 +156,19 @@ venv/bin/python -m src.data_prep
 
 - `data/drug_texts_small.txt`
 - `data/negatives.txt`
+- extra train/val negatives:
+  - `data/train_val_negatives_with_euphemisms.txt`
+- extra test negatives:
+  - `data/test_negatives_with_euphemisms.txt`
 - `data/target_keywords_forms_drug.txt`
 - train/val positive euphemisms:
-  - `data/generated_slang_euphemisms.txt`
+  - `data/train_val_euphemisms.txt`
 - test positive euphemisms:
-  - `data/generated_euphemisms.txt`
+  - `data/test_euphemisms.txt`
 - `target_replacement_fraction=0.5`
 - `positive_limit=10000`
 - `negative_limit=2000`
+- `extra_negative_group_name=negative_euphemism_match`
 
 Результат будет записан в:
 
@@ -173,10 +184,12 @@ outputs/data_prep/splits/
 - сохраняет пунктуацию и короткие числовые токены, чтобы они доходили до token-label датасета и BERT;
 - сэмплирует positive и negative source texts;
 - делит их на `train/val/test`;
+- добавляет extra negatives поверх обычных negatives: `train_val` файл делится только между `train` и `val`, `test` файл целиком попадает только в `test`;
+- помечает эти rows как `source="negative"` и `negative_group="negative_euphemism_match"`;
 - смешивает positives и negatives внутри каждого split;
 - заменяет только часть target keyword mentions, а остальные target mentions тоже размечает как сущности;
-- в `train/val` использует `generated_slang_euphemisms.txt` как replacement pool;
-- в `test` использует `generated_euphemisms.txt` как replacement pool.
+- в `train/val` использует `train_val_euphemisms.txt` как replacement pool;
+- в `test` использует `test_euphemisms.txt` как replacement pool.
 
 Явный запуск этого сценария:
 
@@ -184,8 +197,11 @@ outputs/data_prep/splits/
 venv/bin/python -m src.data_prep \
   --positive-limit 10000 \
   --negative-limit 2000 \
-  --train-euphemisms-paths data/generated_slang_euphemisms.txt \
-  --test-euphemisms-paths data/generated_euphemisms.txt \
+  --extra-negative-train-val-path data/train_val_negatives_with_euphemisms.txt \
+  --extra-negative-test-path data/test_negatives_with_euphemisms.txt \
+  --extra-negative-group-name negative_euphemism_match \
+  --train-euphemisms-paths data/train_val_euphemisms.txt \
+  --test-euphemisms-paths data/test_euphemisms.txt \
   --output-dir outputs/data_prep/splits \
   --target-replacement-fraction 0.5 \
   --train-ratio 0.8 \
@@ -195,6 +211,7 @@ venv/bin/python -m src.data_prep \
 ```
 
 Если нужно поменять negatives или euphemism vocab files, это теперь делается здесь, на этапе подготовки данных.
+Обычная логика `--negatives-path` / `--negative-limit` не меняется; extra negative group добавляется отдельно. Для полного legacy-запуска без extra group используйте `--disable-extra-negative-group`.
 
 ### 2. Преобразовать Split JSON в token-label датасет
 
@@ -375,6 +392,7 @@ venv/bin/python -m src.models.train \
 - `predictions/val.jsonl`
 - `predictions/test.jsonl`
 - `analysis/test_fp_fn.md`
+- `analysis/test_negative_euphemism_match_fp.md`, если в test есть эта extra negative group
 
 Лучший чекпоинт теперь выбирается только по `test`:
 
@@ -397,6 +415,10 @@ venv/bin/python -m src.models.train \
 - для `test` также сохраняется `subsets`:
   - `replacement_pool_only` — метрики только по gold-спанам типа `synthetic_replacement`, то есть по сущностям, пришедшим из того vocabulary pool, который был передан в `--test-euphemisms-paths`;
   - `other_gold_entities_only` — метрики по остальным gold-сущностям в `test` (`unchanged_target_keyword`, а для legacy split-файлов также fallback `other_gold_entity`).
+- для `val` / `test` при наличии extra negative groups сохраняется `negative_groups.<group_name>`:
+  - `samples`, `total_tokens`;
+  - `token_fp`, `span_fp`, `predicted_spans`;
+  - `samples_with_token_fp`, `samples_with_span_fp`.
 
 `run_config.json`, `training_summary.json`, `metrics.json` и `best_model_metrics.json` теперь также содержат `head_mode`, `model_architecture`, `positive_label_id`, `alpha` для `combined` и `best_checkpoint_selection`; TensorBoard-директория добавляется дополнительно и не заменяет существующие метрики.
 
@@ -406,6 +428,8 @@ venv/bin/python -m src.models.train \
 - для каждого sample показываются исходный `Text`, строки `Gold` и `Pred`;
 - entity span-ы подсвечиваются как `[[...]]`;
 - отдельно списком выписываются только `FP` и `FN` с token offsets.
+
+Для extra negative group дополнительно сохраняется `analysis/test_negative_euphemism_match_fp.md`: туда попадают только test sample-ы этой группы, на которых модель дала хотя бы один FP span. Общий `test_fp_fn.md` при этом остаётся агрегированным по всему `test`.
 
 ### 3.1. Sweep по `alpha` для `combined` head
 

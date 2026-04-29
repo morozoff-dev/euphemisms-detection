@@ -83,6 +83,7 @@ class DataSplitRecord:
     source_index: int
     text: str
     entities: list[PreparedEntitySpan]
+    negative_group: str | None = None
     original_text: str | None = None
     euphemisms: list[EuphemismAnnotation] | None = None
 
@@ -94,6 +95,8 @@ class DataSplitRecord:
             "text": self.text,
             "entities": [entity.to_dict() for entity in self.entities],
         }
+        if self.negative_group is not None:
+            payload["negative_group"] = self.negative_group
         if self.original_text is not None:
             payload["original_text"] = self.original_text
         if self.euphemisms is not None:
@@ -104,9 +107,12 @@ class DataSplitRecord:
 DEFAULT_TEXTS_PATH = "data/drug_texts_small.txt"
 DEFAULT_TARGET_WORDS_PATH = "data/target_keywords_forms_drug.txt"
 DEFAULT_NEGATIVES_PATH = "data/negatives.txt"
+DEFAULT_EXTRA_NEGATIVE_TRAIN_VAL_PATH = "data/train_val_negatives_with_euphemisms.txt"
+DEFAULT_EXTRA_NEGATIVE_TEST_PATH = "data/test_negatives_with_euphemisms.txt"
+DEFAULT_EXTRA_NEGATIVE_GROUP_NAME = "negative_euphemism_match"
 DEFAULT_DATA_PREP_OUTPUT_DIR = "outputs/data_prep/splits"
-DEFAULT_TRAIN_EUPHEMISMS_PATHS = ("data/generated_slang_euphemisms.txt",)
-DEFAULT_TEST_EUPHEMISMS_PATHS = ("data/generated_euphemisms.txt",)
+DEFAULT_TRAIN_EUPHEMISMS_PATHS = ("data/train_val_euphemisms.txt",)
+DEFAULT_TEST_EUPHEMISMS_PATHS = ("data/test_euphemisms.txt",)
 DEFAULT_TARGET_REPLACEMENT_FRACTION = 0.5
 DEFAULT_UPPERCASE_LETTER_RATIO_THRESHOLD = 0.5
 DEFAULT_POSITIVE_LIMIT = 10000
@@ -123,6 +129,16 @@ class SourceTextPreprocessingStats:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def empty_preprocessing_stats() -> SourceTextPreprocessingStats:
+    return SourceTextPreprocessingStats(
+        total_input_texts=0,
+        lowercased_mostly_uppercase=0,
+        kept_russian=0,
+        dropped_non_russian=0,
+        dropped_empty_after_normalization=0,
+    )
 
 
 def preprocess_source_texts(
@@ -460,13 +476,16 @@ def build_split_record_from_negative_text(
     text: str,
     *,
     source_index: int,
+    negative_group: str | None = None,
+    sample_id_prefix: str = "negative",
 ) -> DataSplitRecord:
     return DataSplitRecord(
-        sample_id=f"negative-{source_index:06d}",
+        sample_id=f"{sample_id_prefix}-{source_index:06d}",
         source="negative",
         source_index=source_index,
         text=text,
         entities=[],
+        negative_group=negative_group,
     )
 
 
@@ -571,10 +590,45 @@ def split_texts(
     }
 
 
+def split_train_val_texts(
+    texts: list[str],
+    *,
+    train_ratio: float,
+    val_ratio: float,
+    rng: random.Random,
+) -> dict[str, list[str]]:
+    total_ratio = train_ratio + val_ratio
+    if total_ratio <= 0:
+        if texts:
+            raise ValueError(
+                "Extra train/val negatives require a positive train or val ratio."
+            )
+        return {"train": [], "val": [], "test": []}
+
+    shuffled = list(texts)
+    rng.shuffle(shuffled)
+    train_count, val_count = compute_split_counts(
+        len(shuffled),
+        [train_ratio / total_ratio, val_ratio / total_ratio],
+    )
+    train_end = train_count
+    val_end = train_end + val_count
+
+    return {
+        "train": shuffled[:train_end],
+        "val": shuffled[train_end:val_end],
+        "test": [],
+    }
+
+
 def build_dataset_splits(
     *,
     texts_path: str = DEFAULT_TEXTS_PATH,
     negatives_path: str = DEFAULT_NEGATIVES_PATH,
+    extra_negative_train_val_path: str | None = DEFAULT_EXTRA_NEGATIVE_TRAIN_VAL_PATH,
+    extra_negative_test_path: str | None = DEFAULT_EXTRA_NEGATIVE_TEST_PATH,
+    extra_negative_group_name: str = DEFAULT_EXTRA_NEGATIVE_GROUP_NAME,
+    enable_extra_negative_group: bool = True,
     train_euphemisms_paths: Sequence[str] = DEFAULT_TRAIN_EUPHEMISMS_PATHS,
     test_euphemisms_paths: Sequence[str] = DEFAULT_TEST_EUPHEMISMS_PATHS,
     val_euphemisms_paths: Sequence[str] | None = None,
@@ -600,6 +654,27 @@ def build_dataset_splits(
     raw_negatives = load_lines(negatives_path)
     texts, positive_preprocessing_stats = preprocess_source_texts(raw_texts)
     negatives, negative_preprocessing_stats = preprocess_source_texts(raw_negatives)
+
+    extra_train_val_negatives: list[str] = []
+    extra_test_negatives: list[str] = []
+    extra_train_val_preprocessing_stats = empty_preprocessing_stats()
+    extra_test_preprocessing_stats = empty_preprocessing_stats()
+    if enable_extra_negative_group:
+        if extra_negative_train_val_path is None or extra_negative_test_path is None:
+            raise ValueError(
+                "Extra negative group is enabled, so both extra negative paths must be provided."
+            )
+        raw_extra_train_val_negatives = load_lines(extra_negative_train_val_path)
+        raw_extra_test_negatives = load_lines(extra_negative_test_path)
+        (
+            extra_train_val_negatives,
+            extra_train_val_preprocessing_stats,
+        ) = preprocess_source_texts(raw_extra_train_val_negatives)
+        (
+            extra_test_negatives,
+            extra_test_preprocessing_stats,
+        ) = preprocess_source_texts(raw_extra_test_negatives)
+
     target_words = load_lines(target_words_path)
     form_to_lemma = build_target_forms(target_words)
     rng = random.Random(seed)
@@ -636,6 +711,19 @@ def build_dataset_splits(
         test_ratio=test_ratio,
         rng=rng,
     )
+    extra_negative_text_splits = {"train": [], "val": [], "test": []}
+    if enable_extra_negative_group:
+        extra_train_val_splits = split_train_val_texts(
+            extra_train_val_negatives,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            rng=rng,
+        )
+        extra_negative_text_splits = {
+            "train": extra_train_val_splits["train"],
+            "val": extra_train_val_splits["val"],
+            "test": list(extra_test_negatives),
+        }
 
     split_euphemism_paths = {
         "train": coerce_path_list(train_euphemisms_paths),
@@ -650,7 +738,7 @@ def build_dataset_splits(
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
 
-    split_counts: dict[str, dict[str, int | str | list[str]]] = {}
+    split_counts: dict[str, dict[str, object]] = {}
     for offset, split_name in enumerate(("train", "val", "test")):
         euphemisms = load_euphemisms(split_euphemism_paths[split_name])
         positive_samples = build_replaced_samples(
@@ -675,7 +763,16 @@ def build_dataset_splits(
             )
             for index, text in enumerate(negative_text_splits[split_name])
         ]
-        split_rows = positive_records + negative_records
+        extra_negative_records = [
+            build_split_record_from_negative_text(
+                text,
+                source_index=index,
+                negative_group=extra_negative_group_name,
+                sample_id_prefix=f"negative-{extra_negative_group_name}-{split_name}",
+            )
+            for index, text in enumerate(extra_negative_text_splits[split_name])
+        ]
+        split_rows = positive_records + negative_records + extra_negative_records
         rng.shuffle(split_rows)
 
         output_path = destination / f"{split_name}.json"
@@ -683,7 +780,11 @@ def build_dataset_splits(
         split_counts[split_name] = {
             "positive_input_texts": len(positive_text_splits[split_name]),
             "positive_samples": len(positive_records),
-            "negative_samples": len(negative_records),
+            "negative_samples": len(negative_records) + len(extra_negative_records),
+            "base_negative_samples": len(negative_records),
+            "extra_negative_group_samples": {
+                extra_negative_group_name: len(extra_negative_records),
+            },
             "total": len(split_rows),
             "output_path": str(output_path),
             "euphemism_paths": split_euphemism_paths[split_name],
@@ -694,7 +795,18 @@ def build_dataset_splits(
         "input_paths": {
             "positive_texts": texts_path,
             "negative_texts": negatives_path,
+            "extra_negative_train_val_texts": (
+                extra_negative_train_val_path if enable_extra_negative_group else None
+            ),
+            "extra_negative_test_texts": (
+                extra_negative_test_path if enable_extra_negative_group else None
+            ),
             "target_words": target_words_path,
+        },
+        "extra_negative_group": {
+            "enabled": enable_extra_negative_group,
+            "group_name": extra_negative_group_name,
+            "train_val_split_policy": "train_val_ratio_normalized",
         },
         "preprocessing": {
             "text_normalization": {
@@ -722,10 +834,15 @@ def build_dataset_splits(
             },
             "positive_texts": positive_preprocessing_stats.to_dict(),
             "negative_texts": negative_preprocessing_stats.to_dict(),
+            "extra_negative_train_val_texts": (
+                extra_train_val_preprocessing_stats.to_dict()
+            ),
+            "extra_negative_test_texts": extra_test_preprocessing_stats.to_dict(),
         },
         "sampling": {
             "positive_limit": positive_limit,
             "negative_limit": negative_limit,
+            "extra_negative_limit": None,
         },
         "annotation": {
             "target_replacement_fraction": target_replacement_fraction,
@@ -740,16 +857,40 @@ def build_dataset_splits(
                 "positive": len(texts),
                 "negative": len(negatives),
                 "total": len(texts) + len(negatives),
+                "extra_negative_train_val": len(extra_train_val_negatives),
+                "extra_negative_test": len(extra_test_negatives),
+                "total_with_extra": (
+                    len(texts)
+                    + len(negatives)
+                    + len(extra_train_val_negatives)
+                    + len(extra_test_negatives)
+                ),
             },
             "before_sampling": {
                 "positive_candidates": len(candidate_positive_texts),
                 "negative": len(negatives),
                 "total": len(candidate_positive_texts) + len(negatives),
+                "extra_negative_train_val": len(extra_train_val_negatives),
+                "extra_negative_test": len(extra_test_negatives),
+                "total_with_extra": (
+                    len(candidate_positive_texts)
+                    + len(negatives)
+                    + len(extra_train_val_negatives)
+                    + len(extra_test_negatives)
+                ),
             },
             "after_sampling": {
                 "positive": len(sampled_positive_texts),
                 "negative": len(sampled_negative_texts),
                 "total": len(sampled_positive_texts) + len(sampled_negative_texts),
+                "extra_negative_train_val": len(extra_train_val_negatives),
+                "extra_negative_test": len(extra_test_negatives),
+                "total_with_extra": (
+                    len(sampled_positive_texts)
+                    + len(sampled_negative_texts)
+                    + len(extra_train_val_negatives)
+                    + len(extra_test_negatives)
+                ),
             },
         },
         "splits": split_counts,
