@@ -431,7 +431,30 @@ venv/bin/python -m src.models.train \
 
 Для extra negative group дополнительно сохраняется `analysis/test_negative_euphemism_match_fp.md`: туда попадают только test sample-ы этой группы, на которых модель дала хотя бы один FP span. Общий `test_fp_fn.md` при этом остаётся агрегированным по всему `test`.
 
-### 3.1. Sweep по `alpha` для `combined` head
+### 3.1. Подбор probability threshold
+
+Для уже обученного checkpoint можно подобрать порог вероятности отдельно от весов модели. Это eval-only шаг: модель не дообучается, меняется только правило `P(EUPHEMISM) > threshold`.
+
+Пример GPU-only подбора порога прямо на `test` для сохранённой модели:
+
+```bash
+venv/bin/python -m src.models.evaluate \
+  --model-dir outputs/models/rumodernbert_base_04_28_15_57 \
+  --dataset-dir outputs/bio \
+  --device cuda:1 \
+  --select-threshold-on test
+```
+
+CLI перебирает пороги `0.01..0.99` с шагом `0.01`, считает token/span precision, recall, F1 и F2 и выбирает порог по максимальному `span_f2`. При равенстве выбирается больший `span_recall`, затем больший `span_f1`.
+
+Результаты сохраняются рядом с run-директорией:
+
+- `threshold_sweep/test_threshold_sweep.json`
+- `threshold_sweep/selected_threshold_metrics.json`
+
+Если порог подбирается на `test`, JSON содержит предупреждение: это tuned-on-test operating point, а не независимая оценка качества.
+
+### 3.2. Sweep по `alpha` для `combined` head
 
 Для короткого перебора `alpha-learning-rate` и стартового `initial-alpha` теперь есть отдельный CLI:
 
@@ -497,6 +520,7 @@ venv/bin/python scripts/infer_one_text.py \
 - `--input-path` — это обычный `txt`-файл с одним текстом; текст может занимать несколько строк;
 - скрипт читает файл целиком как один input text и прогоняет его через тот же preprocessing, что и dataset pipeline;
 - если текст длиннее training `max_length`, скрипт автоматически прогоняет его по перекрывающимся окнам и потом собирает итоговые token-label предсказания обратно;
+- `--prediction-threshold` задаёт порог вероятности positive-класса; по умолчанию `0.5`, что соответствует прежнему `argmax`-поведению;
 - в stdout печатаются найденные сущности с `char`- и `token`-offset'ами, а также текст с подсветкой `[[...]]`.
 
 При желании можно сохранить полный результат в JSON:
@@ -517,6 +541,7 @@ venv/bin/python scripts/infer_one_text.py \
 - `--head-mode`
 - `--max-length`
 - `--window-overlap-words`
+- `--prediction-threshold`
 - `--print-tags`
 - `--hide-highlight`
 
@@ -532,6 +557,7 @@ venv/bin/python scripts/infer_one_text.py \
 - `word_start_mask` для train/eval/inference;
 - checkpoint loading с custom/legacy compatibility checks;
 - token-level и span-level evaluation;
+- eval-only probability threshold sweep для готового checkpoint;
 - сохранение лучшего чекпоинта, predictions и metrics;
 - отдельный читаемый `test`-лог FP/FN для span-level error analysis;
 - reproducible sampling и split по `seed` на этапе подготовки данных;

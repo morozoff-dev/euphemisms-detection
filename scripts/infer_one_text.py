@@ -86,6 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="How many token units to overlap between inference windows for long texts.",
     )
     parser.add_argument(
+        "--prediction-threshold",
+        type=float,
+        default=0.5,
+        help=(
+            "Positive-class probability threshold. A token is predicted as "
+            "EUPHEMISM only when P(EUPHEMISM) is strictly greater than this value."
+        ),
+    )
+    parser.add_argument(
         "--print-tags",
         action="store_true",
         help="Print the predicted token label for every token unit.",
@@ -281,11 +290,15 @@ def predict_tags_for_tokens(
     max_length: int,
     window_overlap_words: int,
     use_word_start_mask: bool,
+    positive_label_id: int,
+    prediction_threshold: float,
 ) -> tuple[list[str], int]:
     if max_length <= 0:
         raise ValueError("max_length must be positive.")
     if window_overlap_words < 0:
         raise ValueError("window_overlap_words must be non-negative.")
+    if not 0.0 <= prediction_threshold <= 1.0:
+        raise ValueError("--prediction-threshold must be between 0 and 1.")
 
     words = [token.text for token in tokens]
     score_sums = torch_module.zeros((len(words), model.config.num_labels))
@@ -298,6 +311,11 @@ def predict_tags_for_tokens(
         int(label_id): label
         for label_id, label in model.config.id2label.items()
     }
+    if positive_label_id not in id2label:
+        raise RuntimeError(
+            f"Positive label id {positive_label_id} is missing from checkpoint labels."
+        )
+    positive_label = id2label[positive_label_id]
 
     with torch_module.no_grad():
         while start < len(words):
@@ -365,8 +383,10 @@ def predict_tags_for_tokens(
 
     average_scores = score_sums / vote_counts.unsqueeze(-1)
     raw_tags = [
-        id2label[int(label_id)]
-        for label_id in average_scores.argmax(dim=-1).tolist()
+        positive_label
+        if float(scores[positive_label_id].item()) > prediction_threshold
+        else "O"
+        for scores in average_scores
     ]
     return normalize_token_labels(raw_tags), chunk_count
 
@@ -406,6 +426,8 @@ def main() -> int:
         tokens = tokenize_words(input_text)
         if not tokens:
             raise ValueError("The input text does not contain any tokens.")
+        if not 0.0 <= args.prediction_threshold <= 1.0:
+            raise ValueError("--prediction-threshold must be between 0 and 1.")
 
         tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir, use_fast=True)
         if not tokenizer.is_fast:
@@ -428,6 +450,8 @@ def main() -> int:
             max_length=max_length,
             window_overlap_words=args.window_overlap_words,
             use_word_start_mask=not checkpoint_metadata.is_legacy,
+            positive_label_id=checkpoint_metadata.positive_label_id,
+            prediction_threshold=args.prediction_threshold,
         )
         predicted_spans = build_predicted_spans(
             text=input_text,
@@ -444,6 +468,7 @@ def main() -> int:
             "checkpoint_architecture": checkpoint_metadata.checkpoint_architecture,
             "max_length": max_length,
             "window_overlap_words": args.window_overlap_words,
+            "prediction_threshold": args.prediction_threshold,
             "chunk_count": chunk_count,
             "text": input_text,
             "tokens": [token.text for token in tokens],
@@ -462,6 +487,7 @@ def main() -> int:
         print(f"Устройство: {device}")
         print(f"max_length: {max_length}")
         print(f"window_overlap_words: {args.window_overlap_words}")
+        print(f"prediction_threshold: {args.prediction_threshold}")
         print(f"Словарных токенов: {len(tokens)}")
         print(f"Окон инференса: {chunk_count}")
         print(f"Найдено сущностей: {len(predicted_spans)}")
