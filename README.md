@@ -51,6 +51,7 @@
 - `src/data_prep/` — подготовка data split'ов
 - `src/bio/` — token-label конвертация split JSON
 - `src/models/` — загрузка transformer-моделей, custom heads, метрики и training
+- `src/evaluation/` — evaluation CLI для verified real-euphemism JSON
 - `outputs/data_prep/` — подготовленные split JSON-файлы
 - `outputs/bio/` — token-label датасет
 - `outputs/models/` — чекпоинты, метрики и предсказания моделей
@@ -522,6 +523,41 @@ venv/bin/python scripts/infer_one_text.py \
 - `--print-tags`
 - `--hide-highlight`
 
+### 5. Evaluation на verified real-euphemism JSON
+
+Для отдельной проверки чекпоинта на `data/real_test_euph.json` есть CLI:
+
+```bash
+venv/bin/python -m src.evaluation \
+  --model-dir outputs/models/rumodernbert_base_04_29_16_37/best_model \
+  --input-json data/real_test_euph.json \
+  --target-keywords-path data/target_keywords_forms_drug.txt \
+  --head-mode auto \
+  --output-dir outputs/evaluation/real_test_euph
+```
+
+CLI использует только записи с `verified=true`. Внутри каждой записи читаются только:
+
+- `text_body`;
+- `entities[].text`;
+- `entities[].start`;
+- `entities[].end`.
+
+Лишние поля во входном JSON игнорируются. Offsets проверяются строго: для каждой entity должно выполняться `text_body[start:end] == text`.
+
+Метрики считаются после target-keyword masking:
+
+- target keywords загружаются из `data/target_keywords_forms_drug.txt`;
+- сравнение target keyword token-ов делается через такую же нормализацию, как в data prep: lowercase, NFC, `ё -> е`;
+- если target keyword встречается в тексте, размечен как entity или предсказан моделью, соответствующий token принудительно считается `O` и в gold, и в pred;
+- такие token-ы не дают ни TP, ни FP, ни FN для token/span precision, recall и F1.
+
+В `--output-dir` сохраняются:
+
+- `metrics.json` — checkpoint metadata, counts и token/span precision, recall, F1;
+- `predictions.jsonl` — raw и masked gold/pred tags, ignored token positions и span-ы;
+- `analysis/fp_fn.md` — человеко-читаемый FP/FN отчёт по masked-разметке.
+
 ## Что уже реализовано
 
 - загрузка и очистка raw texts;
@@ -534,6 +570,7 @@ venv/bin/python scripts/infer_one_text.py \
 - `word_start_mask` для train/eval/inference;
 - checkpoint loading с custom/legacy compatibility checks;
 - token-level и span-level evaluation;
+- отдельный CLI для evaluation на verified real-euphemism JSON с ignore target-keyword masking;
 - сохранение лучшего чекпоинта, predictions и metrics;
 - отдельный читаемый `test`-лог FP/FN для span-level error analysis;
 - reproducible sampling и split по `seed` на этапе подготовки данных;
