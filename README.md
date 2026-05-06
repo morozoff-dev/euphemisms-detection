@@ -18,7 +18,7 @@
    - на раннем preprocessing этапе сохраняются только тексты, для которых `cld2` определяет основной язык как русский (`ru`);
    - если в тексте более 50% букв находятся в верхнем регистре, такой текст полностью переводится в нижний регистр;
    - пунктуация сохраняется, а числовые токены длиной до 3 цифр остаются в тексте как есть;
-   - positive texts с упоминаниями target keywords сэмплируются, как и negatives;
+   - positive texts с упоминаниями target keywords сэмплируются случайно или, если заданы CLI-проценты, по числу target words в тексте: `1`, `2`, `3`, `4+`;
    - positives и negatives независимо режутся на `train/val/test` с сохранением заданного соотношения;
    - extra `train_val` negatives режутся только между `train` и `val`, extra `test` negatives целиком добавляются только в `test`;
    - target keywords заменяются частично: по умолчанию заменяется 50% найденных mentions, остальные остаются в тексте и тоже размечаются как сущности;
@@ -93,6 +93,7 @@
 - сколько extra negative текстов осталось после preprocessing;
 - какая доля target keyword mentions заменялась;
 - сколько positive/negative примеров было до и после sampling;
+- какое распределение positive-текстов по числу target words было доступно и выбрано при sampling;
 - как распределились данные по `train/val/test`.
 
 ### Token-label Dataset
@@ -169,6 +170,7 @@ venv/bin/python -m src.data_prep
 - `target_replacement_fraction=0.5`
 - `positive_limit=10000`
 - `negative_limit=2000`
+- controlled sampling по числу target words выключен
 - `extra_negative_group_name=negative_euphemism_match`
 
 Результат будет записан в:
@@ -184,6 +186,7 @@ outputs/data_prep/splits/
 - если в тексте больше 50% букв в верхнем регистре, полностью переводит его в lower-case;
 - сохраняет пунктуацию и короткие числовые токены, чтобы они доходили до token-label датасета и BERT;
 - сэмплирует positive и negative source texts;
+- при передаче `--one-target-per-text`, `--two-targets-per-text` или `--three-targets-per-text` отбирает positive source texts по заданным процентам текстов с 1/2/3 target words; доля `4+` считается как остаток до 100%;
 - делит их на `train/val/test`;
 - добавляет extra negatives поверх обычных negatives: `train_val` файл делится только между `train` и `val`, `test` файл целиком попадает только в `test`;
 - помечает эти rows как `source="negative"` и `negative_group="negative_euphemism_match"`;
@@ -213,6 +216,18 @@ venv/bin/python -m src.data_prep \
 
 Если нужно поменять negatives или euphemism vocab files, это теперь делается здесь, на этапе подготовки данных.
 Обычная логика `--negatives-path` / `--negative-limit` не меняется; extra negative group добавляется отдельно. Для полного legacy-запуска без extra group используйте `--disable-extra-negative-group`.
+
+Пример controlled sampling для positive-текстов:
+
+```bash
+venv/bin/python -m src.data_prep \
+  --positive-limit 10000 \
+  --one-target-per-text 60 \
+  --two-targets-per-text 25 \
+  --three-targets-per-text 10
+```
+
+В этом примере 5% positive-текстов будут браться из корзины `4+`, потому что `100 - 60 - 25 - 10 = 5`. Проценты считаются только среди positive-текстов, где есть хотя бы один target word; negative-тексты и тексты без target words в эту базу расчёта не входят. Если в нужной корзине не хватает текстов, `src.data_prep` завершится с понятной ошибкой вместо тихого добора из других корзин.
 
 ### 2. Преобразовать Split JSON в token-label датасет
 

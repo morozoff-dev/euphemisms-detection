@@ -88,6 +88,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum number of positive source texts to sample before splitting.",
     )
     parser.add_argument(
+        "--one-target-per-text",
+        type=float,
+        default=None,
+        help=(
+            "Percentage of positive texts with exactly one target keyword. "
+            "If any target-count percentage is set, omitted percentages default to 0."
+        ),
+    )
+    parser.add_argument(
+        "--two-targets-per-text",
+        type=float,
+        default=None,
+        help=(
+            "Percentage of positive texts with exactly two target keywords. "
+            "The 4+ percentage is computed as 100 minus the 1/2/3 percentages."
+        ),
+    )
+    parser.add_argument(
+        "--three-targets-per-text",
+        type=float,
+        default=None,
+        help=(
+            "Percentage of positive texts with exactly three target keywords. "
+            "Texts without target keywords are not included in these percentages."
+        ),
+    )
+    parser.add_argument(
         "--negative-limit",
         type=int,
         default=DEFAULT_NEGATIVE_LIMIT,
@@ -148,6 +175,9 @@ def main() -> int:
         target_replacement_fraction=args.target_replacement_fraction,
         positive_limit=args.positive_limit,
         negative_limit=args.negative_limit,
+        one_target_per_text=args.one_target_per_text,
+        two_targets_per_text=args.two_targets_per_text,
+        three_targets_per_text=args.three_targets_per_text,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
@@ -180,6 +210,15 @@ def main() -> int:
         f"{counts['after_sampling']['extra_negative_train_val']} extra train_val negative, "
         f"{counts['after_sampling']['extra_negative_test']} extra test negative"
     )
+    target_count_distribution = manifest["sampling"][
+        "positive_target_count_distribution"
+    ]
+    if target_count_distribution["enabled"]:
+        print(
+            "Positive target-count sampling: "
+            f"requested_percentages={target_count_distribution['requested_percentages']}, "
+            f"sampled_counts={target_count_distribution['sampled_counts']}"
+        )
     for split_name in ("train", "val", "test"):
         split_info = manifest["splits"][split_name]
         print(

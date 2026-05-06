@@ -117,6 +117,7 @@ DEFAULT_TARGET_REPLACEMENT_FRACTION = 0.5
 DEFAULT_UPPERCASE_LETTER_RATIO_THRESHOLD = 0.5
 DEFAULT_POSITIVE_LIMIT = 10000
 DEFAULT_NEGATIVE_LIMIT = 2000
+TARGET_COUNT_BUCKET_LABELS = ("1", "2", "3", "4_plus")
 
 
 @dataclass(frozen=True)
@@ -501,12 +502,185 @@ def contains_lookup_form(
     )
 
 
+def count_target_keywords(
+    text: str,
+    *,
+    form_to_lemma: dict[str, str],
+) -> int:
+    normalized_text = nfc(text)
+    return sum(
+        1
+        for match in WORD_RE.finditer(normalized_text)
+        if lookup_norm(match.group(0)) in form_to_lemma
+    )
+
+
 def contains_target_keyword(
     text: str,
     *,
     form_to_lemma: dict[str, str],
 ) -> bool:
-    return contains_lookup_form(text, lookup=form_to_lemma)
+    return count_target_keywords(text, form_to_lemma=form_to_lemma) > 0
+
+
+def target_count_bucket(target_count: int) -> str:
+    if target_count <= 0:
+        raise ValueError("Target count bucket requires at least one target keyword.")
+    if target_count >= 4:
+        return "4_plus"
+    return str(target_count)
+
+
+def empty_target_count_distribution() -> dict[str, int]:
+    return {label: 0 for label in TARGET_COUNT_BUCKET_LABELS}
+
+
+def target_count_distribution(
+    target_counts: Iterable[int],
+) -> dict[str, int]:
+    distribution = empty_target_count_distribution()
+    for target_count in target_counts:
+        if target_count > 0:
+            distribution[target_count_bucket(target_count)] += 1
+    return distribution
+
+
+def target_count_distribution_for_texts(
+    texts: Iterable[str],
+    *,
+    form_to_lemma: dict[str, str],
+) -> dict[str, int]:
+    return target_count_distribution(
+        count_target_keywords(text, form_to_lemma=form_to_lemma)
+        for text in texts
+    )
+
+
+def is_target_count_distribution_enabled(
+    *,
+    one_target_per_text: float | None,
+    two_targets_per_text: float | None,
+    three_targets_per_text: float | None,
+) -> bool:
+    return any(
+        value is not None
+        for value in (
+            one_target_per_text,
+            two_targets_per_text,
+            three_targets_per_text,
+        )
+    )
+
+
+def validate_target_count_percentage(
+    value: float | None,
+    *,
+    name: str,
+) -> float:
+    if value is None:
+        return 0.0
+    if value < 0 or value > 100:
+        raise ValueError(f"{name} must be between 0 and 100.")
+    return float(value)
+
+
+def build_target_count_percentages(
+    *,
+    one_target_per_text: float | None,
+    two_targets_per_text: float | None,
+    three_targets_per_text: float | None,
+) -> dict[str, float]:
+    one_target_percentage = validate_target_count_percentage(
+        one_target_per_text,
+        name="one_target_per_text",
+    )
+    two_targets_percentage = validate_target_count_percentage(
+        two_targets_per_text,
+        name="two_targets_per_text",
+    )
+    three_targets_percentage = validate_target_count_percentage(
+        three_targets_per_text,
+        name="three_targets_per_text",
+    )
+    explicit_total = (
+        one_target_percentage + two_targets_percentage + three_targets_percentage
+    )
+    if explicit_total > 100:
+        raise ValueError(
+            "Target count percentages must sum to 100 or less: "
+            f"got {explicit_total}."
+        )
+    return {
+        "1": one_target_percentage,
+        "2": two_targets_percentage,
+        "3": three_targets_percentage,
+        "4_plus": 100.0 - explicit_total,
+    }
+
+
+def compute_target_count_sample_counts(
+    total_size: int,
+    *,
+    percentages: dict[str, float],
+) -> dict[str, int]:
+    counts = compute_split_counts(
+        total_size,
+        [percentages[label] / 100.0 for label in TARGET_COUNT_BUCKET_LABELS],
+    )
+    return dict(zip(TARGET_COUNT_BUCKET_LABELS, counts, strict=True))
+
+
+def build_target_count_buckets(
+    texts_with_target_counts: Iterable[tuple[str, int]],
+) -> dict[str, list[str]]:
+    buckets = {label: [] for label in TARGET_COUNT_BUCKET_LABELS}
+    for text, target_count in texts_with_target_counts:
+        if target_count > 0:
+            buckets[target_count_bucket(target_count)].append(text)
+    return buckets
+
+
+def sample_positive_texts_by_target_count_distribution(
+    texts_with_target_counts: list[tuple[str, int]],
+    *,
+    limit: int | None,
+    percentages: dict[str, float],
+    rng: random.Random,
+) -> tuple[list[str], dict[str, int], dict[str, int]]:
+    buckets = build_target_count_buckets(texts_with_target_counts)
+    available_counts = {
+        label: len(buckets[label]) for label in TARGET_COUNT_BUCKET_LABELS
+    }
+    sample_size = choose_sample_size(
+        sum(available_counts.values()),
+        limit=limit,
+    )
+    requested_counts = compute_target_count_sample_counts(
+        sample_size,
+        percentages=percentages,
+    )
+    missing = {
+        label: requested_counts[label] - available_counts[label]
+        for label in TARGET_COUNT_BUCKET_LABELS
+        if requested_counts[label] > available_counts[label]
+    }
+    if missing:
+        raise ValueError(
+            "Not enough positive texts for requested target-count distribution: "
+            f"requested={requested_counts}, available={available_counts}, "
+            f"missing={missing}."
+        )
+
+    sampled_texts: list[str] = []
+    for label in TARGET_COUNT_BUCKET_LABELS:
+        bucket = buckets[label]
+        count = requested_counts[label]
+        if count == len(bucket):
+            sampled_texts.extend(bucket)
+        else:
+            sampled_texts.extend(rng.sample(bucket, count))
+    rng.shuffle(sampled_texts)
+    return sampled_texts, available_counts, requested_counts
 
 
 def choose_sample_size(
@@ -637,6 +811,9 @@ def build_dataset_splits(
     target_replacement_fraction: float = DEFAULT_TARGET_REPLACEMENT_FRACTION,
     positive_limit: int | None = DEFAULT_POSITIVE_LIMIT,
     negative_limit: int | None = DEFAULT_NEGATIVE_LIMIT,
+    one_target_per_text: float | None = None,
+    two_targets_per_text: float | None = None,
+    three_targets_per_text: float | None = None,
     train_ratio: float = 0.8,
     val_ratio: float = 0.1,
     test_ratio: float = 0.1,
@@ -649,6 +826,20 @@ def build_dataset_splits(
     )
     if target_replacement_fraction < 0 or target_replacement_fraction > 1:
         raise ValueError("Target replacement fraction must be between 0.0 and 1.0.")
+    target_count_distribution_enabled = is_target_count_distribution_enabled(
+        one_target_per_text=one_target_per_text,
+        two_targets_per_text=two_targets_per_text,
+        three_targets_per_text=three_targets_per_text,
+    )
+    target_count_percentages = (
+        build_target_count_percentages(
+            one_target_per_text=one_target_per_text,
+            two_targets_per_text=two_targets_per_text,
+            three_targets_per_text=three_targets_per_text,
+        )
+        if target_count_distribution_enabled
+        else None
+    )
 
     raw_texts = load_lines(texts_path)
     raw_negatives = load_lines(negatives_path)
@@ -678,19 +869,42 @@ def build_dataset_splits(
     target_words = load_lines(target_words_path)
     form_to_lemma = build_target_forms(target_words)
     rng = random.Random(seed)
+    candidate_positive_texts_with_counts: list[tuple[str, int]] = []
+    for text in texts:
+        target_count = count_target_keywords(text, form_to_lemma=form_to_lemma)
+        if target_count > 0:
+            candidate_positive_texts_with_counts.append((text, target_count))
+
     candidate_positive_texts = [
-        text
-        for text in texts
-        if contains_target_keyword(
-            text,
+        text for text, _ in candidate_positive_texts_with_counts
+    ]
+    available_target_count_distribution = target_count_distribution(
+        target_count for _, target_count in candidate_positive_texts_with_counts
+    )
+    requested_target_count_sample_counts: dict[str, int] | None = None
+    if target_count_distribution_enabled:
+        assert target_count_percentages is not None
+        (
+            sampled_positive_texts,
+            available_target_count_distribution,
+            requested_target_count_sample_counts,
+        ) = sample_positive_texts_by_target_count_distribution(
+            candidate_positive_texts_with_counts,
+            limit=positive_limit,
+            percentages=target_count_percentages,
+            rng=rng,
+        )
+        sampled_target_count_distribution = dict(requested_target_count_sample_counts)
+    else:
+        sampled_positive_texts = sample_records(
+            candidate_positive_texts,
+            limit=positive_limit,
+            rng=rng,
+        )
+        sampled_target_count_distribution = target_count_distribution_for_texts(
+            sampled_positive_texts,
             form_to_lemma=form_to_lemma,
         )
-    ]
-    sampled_positive_texts = sample_records(
-        candidate_positive_texts,
-        limit=positive_limit,
-        rng=rng,
-    )
     sampled_negative_texts = sample_records(
         negatives,
         limit=negative_limit,
@@ -780,6 +994,12 @@ def build_dataset_splits(
         split_counts[split_name] = {
             "positive_input_texts": len(positive_text_splits[split_name]),
             "positive_samples": len(positive_records),
+            "positive_target_count_distribution": (
+                target_count_distribution_for_texts(
+                    positive_text_splits[split_name],
+                    form_to_lemma=form_to_lemma,
+                )
+            ),
             "negative_samples": len(negative_records) + len(extra_negative_records),
             "base_negative_samples": len(negative_records),
             "extra_negative_group_samples": {
@@ -843,6 +1063,13 @@ def build_dataset_splits(
             "positive_limit": positive_limit,
             "negative_limit": negative_limit,
             "extra_negative_limit": None,
+            "positive_target_count_distribution": {
+                "enabled": target_count_distribution_enabled,
+                "requested_percentages": target_count_percentages,
+                "requested_counts": requested_target_count_sample_counts,
+                "available_candidate_counts": available_target_count_distribution,
+                "sampled_counts": sampled_target_count_distribution,
+            },
         },
         "annotation": {
             "target_replacement_fraction": target_replacement_fraction,
