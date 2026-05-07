@@ -429,6 +429,42 @@ def load_euphemisms(
     ]
 
 
+def build_euphemism_lookup(euphemism_texts: Iterable[str]) -> dict[str, object]:
+    return dict.fromkeys(
+        lookup_norm(euphemism)
+        for euphemism in euphemism_texts
+        if lookup_norm(euphemism)
+    )
+
+
+def contains_euphemism_lookup_form(
+    text: str,
+    *,
+    euphemism_lookup: dict[str, object],
+) -> bool:
+    return contains_lookup_form(text, lookup=euphemism_lookup)
+
+
+def filter_texts_with_euphemism_lookup_forms(
+    texts: Iterable[str],
+    *,
+    euphemism_lookup: dict[str, object],
+) -> tuple[list[str], int]:
+    kept_texts: list[str] = []
+    dropped_count = 0
+
+    for text in texts:
+        if contains_euphemism_lookup_form(
+            text,
+            euphemism_lookup=euphemism_lookup,
+        ):
+            dropped_count += 1
+            continue
+        kept_texts.append(text)
+
+    return kept_texts, dropped_count
+
+
 def build_replaced_samples(
     texts: Iterable[str],
     *,
@@ -840,6 +876,22 @@ def build_dataset_splits(
         if target_count_distribution_enabled
         else None
     )
+    split_euphemism_paths = {
+        "train": coerce_path_list(train_euphemisms_paths),
+        "val": coerce_path_list(
+            val_euphemisms_paths
+            if val_euphemisms_paths is not None
+            else train_euphemisms_paths
+        ),
+        "test": coerce_path_list(test_euphemisms_paths),
+    }
+    positive_euphemism_filter_paths = list(
+        dict.fromkeys(
+            path
+            for split_paths in split_euphemism_paths.values()
+            for path in split_paths
+        )
+    )
 
     raw_texts = load_lines(texts_path)
     raw_negatives = load_lines(negatives_path)
@@ -868,6 +920,16 @@ def build_dataset_splits(
 
     target_words = load_lines(target_words_path)
     form_to_lemma = build_target_forms(target_words)
+    positive_euphemism_lookup = build_euphemism_lookup(
+        load_euphemism_texts(positive_euphemism_filter_paths)
+    )
+    positive_texts_before_euphemism_filter = len(texts)
+    texts, positive_euphemism_filter_dropped = (
+        filter_texts_with_euphemism_lookup_forms(
+            texts,
+            euphemism_lookup=positive_euphemism_lookup,
+        )
+    )
     rng = random.Random(seed)
     candidate_positive_texts_with_counts: list[tuple[str, int]] = []
     for text in texts:
@@ -938,16 +1000,6 @@ def build_dataset_splits(
             "val": extra_train_val_splits["val"],
             "test": list(extra_test_negatives),
         }
-
-    split_euphemism_paths = {
-        "train": coerce_path_list(train_euphemisms_paths),
-        "val": coerce_path_list(
-            val_euphemisms_paths
-            if val_euphemisms_paths is not None
-            else train_euphemisms_paths
-        ),
-        "test": coerce_path_list(test_euphemisms_paths),
-    }
 
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
@@ -1059,6 +1111,16 @@ def build_dataset_splits(
             ),
             "extra_negative_test_texts": extra_test_preprocessing_stats.to_dict(),
         },
+        "positive_euphemism_source_filter": {
+            "enabled": True,
+            "scope": "positive_texts_only",
+            "match_policy": "word_token_lookup_norm",
+            "euphemism_paths": positive_euphemism_filter_paths,
+            "vocabulary_size": len(positive_euphemism_lookup),
+            "before_filter": positive_texts_before_euphemism_filter,
+            "dropped_containing_euphemisms": positive_euphemism_filter_dropped,
+            "after_filter": len(texts),
+        },
         "sampling": {
             "positive_limit": positive_limit,
             "negative_limit": negative_limit,
@@ -1081,13 +1143,13 @@ def build_dataset_splits(
         },
         "counts": {
             "after_preprocessing": {
-                "positive": len(texts),
+                "positive": positive_texts_before_euphemism_filter,
                 "negative": len(negatives),
-                "total": len(texts) + len(negatives),
+                "total": positive_texts_before_euphemism_filter + len(negatives),
                 "extra_negative_train_val": len(extra_train_val_negatives),
                 "extra_negative_test": len(extra_test_negatives),
                 "total_with_extra": (
-                    len(texts)
+                    positive_texts_before_euphemism_filter
                     + len(negatives)
                     + len(extra_train_val_negatives)
                     + len(extra_test_negatives)

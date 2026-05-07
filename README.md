@@ -185,6 +185,7 @@ outputs/data_prep/splits/
 - оставляет только те positive и negative source texts, для которых `cld2` определяет основной язык как русский;
 - если в тексте больше 50% букв в верхнем регистре, полностью переводит его в lower-case;
 - сохраняет пунктуацию и короткие числовые токены, чтобы они доходили до token-label датасета и BERT;
+- исключает из positive source texts тексты, где уже встречаются word-level формы из train/val/test euphemism replacement pools;
 - сэмплирует positive и negative source texts;
 - при передаче `--one-target-per-text`, `--two-targets-per-text` или `--three-targets-per-text` отбирает positive source texts по заданным процентам текстов с 1/2/3 target words; доля `4+` считается как остаток до 100%;
 - делит их на `train/val/test`;
