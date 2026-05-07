@@ -11,7 +11,7 @@
 Проект устроен как трёхшаговый pipeline:
 
 1. В `src.data_prep` из сырых positive и negative текстов строятся уже готовые split-файлы для датасета:
-   - positive texts берутся из `data/drug_texts_small.txt`;
+   - positive texts по умолчанию берутся из `data/drug_texts_small.txt`, путь можно переопределить через `--positive-texts-path`;
    - negative texts берутся из `data/negatives.txt`;
    - отдельные extra negatives с эвфемизмами по умолчанию берутся из `data/train_val_negatives_with_euphemisms.txt` для `train/val` и `data/test_negatives_with_euphemisms.txt` для `test`;
    - перед language filter тексты проходят annotation-oriented preprocessing: `NFKC`, удаление zero-width/HTML/entity/emoji, замена `URL` / `email` / `@mention` / телефонов / длинных чисел на маркеры;
@@ -200,6 +200,7 @@ outputs/data_prep/splits/
 
 ```bash
 venv/bin/python -m src.data_prep \
+  --positive-texts-path data/drug_texts_small.txt \
   --positive-limit 10000 \
   --negative-limit 2000 \
   --extra-negative-train-val-path data/train_val_negatives_with_euphemisms.txt \
@@ -215,7 +216,8 @@ venv/bin/python -m src.data_prep \
   --seed 42
 ```
 
-Если нужно поменять negatives или euphemism vocab files, это теперь делается здесь, на этапе подготовки данных.
+Если нужно поменять файл с positive-текстами, negatives или euphemism vocab files, это теперь делается здесь, на этапе подготовки данных.
+`--texts-path` остаётся поддержанным старым именем для `--positive-texts-path`.
 Обычная логика `--negatives-path` / `--negative-limit` не меняется; extra negative group добавляется отдельно. Для полного legacy-запуска без extra group используйте `--disable-extra-negative-group`.
 
 Пример controlled sampling для positive-текстов:

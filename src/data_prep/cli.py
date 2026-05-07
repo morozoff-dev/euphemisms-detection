@@ -10,6 +10,7 @@ from src.data_prep.builder import (
     DEFAULT_NEGATIVES_PATH,
     DEFAULT_POSITIVE_LIMIT,
     DEFAULT_DATA_PREP_OUTPUT_DIR,
+    DEFAULT_TEXTS_PATH,
     DEFAULT_TARGET_REPLACEMENT_FRACTION,
     DEFAULT_TEST_EUPHEMISMS_PATHS,
     DEFAULT_TRAIN_EUPHEMISMS_PATHS,
@@ -23,7 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--texts-path",
-        default="data/drug_texts_small.txt",
+        "--positive-texts-path",
+        dest="texts_path",
+        default=DEFAULT_TEXTS_PATH,
         help="Path to positive corpus texts, one text per line.",
     )
     parser.add_argument(
